@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CineMap — Global Cinema Analytics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg width="16" height="16" viewBox="0 0 16 16"><rect x="1" y="2" width="14" height="12" rx="1.5" fill="#0a0e1a"/><rect x="3" y="4" width="2" height="2" fill="#efa838"/><rect x="3" y="7.5" width="2" height="2" fill="#efa838"/><rect x="3" y="11" width="2" height="1.4" fill="#efa838"/><rect x="11" y="4" width="2" height="2" fill="#efa838"/><rect x="11" y="7.5" width="2" height="2" fill="#efa838"/><rect x="11" y="11" width="2" height="1.4" fill="#efa838"/></svg>
+      </div>
+      <div>
+        <div class="brand-name">CineMap</div>
+        <div class="brand-sub">Film Dashboard</div>
+      </div>
+    </div>
+    <div class="title-wrap">
+      <div class="title">Global Cinema Analytics</div>
+      <div class="subtitle"><span id="films-found">0</span> films found &middot; <span id="countries-found">0</span> countries</div>
+    </div>
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="map">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="6.3"/><path d="M1.7 8h12.6M8 1.7c1.8 1.7 2.8 4 2.8 6.3S9.8 12.6 8 14.3C6.2 12.6 5.2 10.3 5.2 8S6.2 3.4 8 1.7z"/></svg>Map
+      </button>
+      <button class="tab" data-tab="charts">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="1.5" y="8" width="3" height="6.5" rx="1"/><rect x="6.5" y="4" width="3" height="10.5" rx="1"/><rect x="11.5" y="6" width="3" height="8.5" rx="1"/></svg>Charts
+      </button>
+      <button class="tab" data-tab="table">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4h12M2 8h12M2 12h12"/></svg>Table
+      </button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Sidebar (filters built by app.js) -->
+    <aside class="sidebar">
+      <div class="sidebar-scroll" id="sidebar"></div>
+      <div class="clear-wrap"><div class="clear-btn" id="clear-btn">Clear filters</div></div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+
+      <div class="stat-cards">
+        <div class="stat-card">
+          <div class="stat-head"><span class="stat-ico"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.3"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M5 3v10M11 3v10M2 6.3h3M2 9.6h3M11 6.3h3M11 9.6h3"/></svg></span><span>Total Films</span></div>
+          <div class="stat-value" id="st-total">0</div>
+          <div class="stat-sub">of <span id="st-totalall">40</span> total</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-head"><span class="stat-ico"><svg width="12" height="12" viewBox="0 0 16 16" fill="var(--accent)"><path d="M8 3l5.5 10h-11z"/></svg></span><span>Votes IMDB</span></div>
+          <div class="stat-value" id="st-vimdb">0</div>
+          <div class="stat-sub">IMDb votes</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-head"><span class="stat-ico"><svg width="12" height="12" viewBox="0 0 16 16" fill="var(--accent)"><path d="M8 3l5.5 10h-11z"/></svg></span><span>Votes MovieLens</span></div>
+          <div class="stat-value" id="st-vml">0</div>
+          <div class="stat-sub">MovieLens votes</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-head"><span class="stat-ico"><svg width="12" height="12" viewBox="0 0 16 16" fill="var(--accent)"><path d="M8 1.5l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.3 4.2 13.3l.7-4.3-3.1-3 4.3-.6z"/></svg></span><span>Avg Rating IMDB</span></div>
+          <div class="stat-value">&#9733; <span id="st-aimdb">0.0</span></div>
+          <div class="stat-sub">of 10</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-head"><span class="stat-ico"><svg width="12" height="12" viewBox="0 0 16 16" fill="var(--accent)"><path d="M8 1.5l1.9 3.9 4.3.6-3.1 3 .7 4.3L8 11.3 4.2 13.3l.7-4.3-3.1-3 4.3-.6z"/></svg></span><span>Avg Rating MovieLens</span></div>
+          <div class="stat-value">&#9733; <span id="st-aml">0.0</span></div>
+          <div class="stat-sub">of 5</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-head"><span class="stat-ico"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.3"><circle cx="8" cy="9.5" r="4"/><path d="M6 1.8l1.4 3.4M10 1.8l-1.4 3.4"/></svg></span><span>Oscars Awards</span></div>
+          <div class="stat-value" id="st-osc">0</div>
+          <div class="stat-sub">wins</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-head"><span class="stat-ico"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.3"><circle cx="8" cy="6.5" r="4"/><path d="M5.6 9.5L4.5 14l3.5-2 3.5 2-1.1-4.5"/></svg></span><span>Other Awards</span></div>
+          <div class="stat-value" id="st-oth">0</div>
+          <div class="stat-sub">wins &amp; noms</div>
+        </div>
+      </div>
+
+      <!-- Map tab -->
+      <section class="tab-pane active" id="pane-map">
+        <div class="map-scroll">
+          <div class="map-box">
+            <div class="map-holder" id="map-holder"></div>
+            <div class="tooltip" id="tooltip"></div>
+            <div class="legend" style="display:none"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-title">DISTRIBUTION BY GENRE</div>
+            <div class="dist-row" id="dist-row"></div>
+          </div>
+          <div class="div-grid" id="div-grid"></div>
+        </div>
+      </section>
+
+      <!-- Charts tab -->
+      <section class="tab-pane" id="pane-charts">
+        <div class="charts-scroll" id="charts-scroll"></div>
+      </section>
+
+      <!-- Table tab -->
+      <section class="tab-pane" id="pane-table">
+        <div class="table-wrap">
+          <div class="thead" id="thead"></div>
+          <div id="tbody"></div>
+          <div id="tpager" class="tpager"></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+<script src="country-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
