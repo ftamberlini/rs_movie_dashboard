@@ -12,6 +12,7 @@
   var ML_GENRES = ['Action','Adventure','Animation','Children','Comedy','Crime','Documentary','Drama','Fantasy','Film-Noir','Horror','IMAX','Musical','Mystery','Romance','Sci-Fi','Thriller','War','Western','(no genres listed)'];
   var IMDB_GENRES = ['Action','Adult','Adventure','Animation','Biography','Children','Comedy','Crime','Documentary','Drama','Family','Fantasy','Film-Noir','Game-Show','History','Horror','Music','Musical','Mystery','News','Reality-TV','Romance','Sci-Fi','Short','Sport','Talk-Show','Thriller','War','Western'];
   var YEARS = []; // populated from Oracle data after load
+  var RATINGS_DIST = []; // [{rating, votes}] from /api/ratings-dist
   var GENDERS = ['Male','Female','Unknown'];
   var RACES = ['WHITE','ASIAN','BLACK','INDIGENOUS','MIXED-RACE','UNKNOWN'];
   var RACE_COLORS = {WHITE:'#cdbba0',ASIAN:'#e0b54a',BLACK:'#7a5a48',INDIGENOUS:'#cf6a3c','MIXED-RACE':'#b98a5e',UNKNOWN:'#8b97a8'};
@@ -106,7 +107,7 @@
       countries: uniqSort(FILMS.map(function (f) { return f.country; }))
     };
   }
-  function uniqSort(a) { return Array.prototype.slice.call(new Set(a)).sort(); }
+  function uniqSort(a) { return Array.from(new Set(a)).sort(); }
 
   /* ---------------- State ---------------- */
   var PAGE_SIZE = 50;
@@ -267,7 +268,7 @@
   }
 
   /* ---------------- Render ---------------- */
-  var _bubbles = [], _world = null, _worldLoading = false, _ro = null, _lastSig = null;
+  var _bubbles = [], _dirBubbles = [], _wriBubbles = [], _world = null, _worldLoading = false, _ro = null, _ro2 = null, _ro3 = null, _ro4 = null, _lastSig = null;
 
   function render() {
     var fs = filterFilms();
@@ -296,6 +297,8 @@
 
     // map bubbles (always compute)
     _bubbles = computeBubbles(fs);
+    _dirBubbles = computeDirBubbles(fs);
+    _wriBubbles = computeWriBubbles(fs);
 
     // tab content
     if (state.tab === 'map') { renderDist(fs); renderDiversity(fs); ensureMap(); }
@@ -361,7 +364,7 @@
     var bands = [['> 60', 61, 999], ['51 a 60', 51, 60], ['41 a 50', 41, 50], ['31 a 40', 31, 40], ['21 a 30', 21, 30], ['ate 20', 0, 20]];
     var rows = bands.map(function (b) {
       var male = 0, female = 0;
-      fs.forEach(function (f) { var p = f[key]; if (p.age >= b[1] && p.age <= b[2]) { if (p.gender === 'Male') male++; else if (p.gender === 'Female') female++; } });
+      fs.forEach(function (f) { var p = f[key]; if (p.age != null && p.age >= b[1] && p.age <= b[2]) { if (p.gender === 'Male') male++; else if (p.gender === 'Female') female++; } });
       return { label: b[0], male: male, female: female };
     });
     var aMax = Math.max.apply(null, [1].concat(rows.map(function (r) { return Math.max(r.male, r.female); })));
@@ -394,74 +397,137 @@
   }
 
   /* ---------------- Charts ---------------- */
-  function renderCharts(fs) {
-    var wrap = $('charts-scroll'); wrap.innerHTML = '';
-
-    // Genre distribution (horizontal)
-    var gc = {}; fs.forEach(function (f) { gc[f.genre] = (gc[f.genre] || 0) + 1; });
-    var gArr = Object.keys(gc).map(function (g) { return { label: g, n: gc[g], color: colorOf(g) }; }).sort(function (a, b) { return b.n - a.n; });
-    var gMax = Math.max.apply(null, [1].concat(gArr.map(function (d) { return d.n; })));
-    var c1 = chartCard('Genre Distribution');
-    gArr.forEach(function (d) {
-      c1.appendChild(el('div', { class: 'hbar-row' }, [
+  function hbarChart(title, arr, fmtVal) {
+    var max = Math.max.apply(null, [1].concat(arr.map(function (d) { return d.n; })));
+    var card = chartCard(title);
+    arr.forEach(function (d) {
+      card.appendChild(el('div', { class: 'hbar-row' }, [
         el('div', { class: 'hbar-label' }, d.label),
-        el('div', { class: 'hbar-track' }, el('div', { class: 'hbar-fill', style: 'width:' + Math.max(6, d.n / gMax * 100) + '%;background:' + d.color })),
-        el('div', { class: 'hbar-val' }, d.n)
+        el('div', { class: 'hbar-track' }, el('div', { class: 'hbar-fill', style: 'width:' + (d.n ? Math.max(6, d.n / max * 100) : 0) + '%;' + (d.color ? 'background:' + d.color : '') })),
+        el('div', { class: 'hbar-val' }, fmtVal ? fmtVal(d.n) : d.n)
       ]));
     });
-    wrap.appendChild(c1);
+    return card;
+  }
 
-    // Films by year (vertical)
-    var yc = {}; YEARS.forEach(function (y) { yc[y] = 0; });
-    fs.forEach(function (f) { if (yc[f.year] != null) yc[f.year]++; });
-    var yMax = Math.max.apply(null, [1].concat(YEARS.map(function (y) { return yc[y]; })));
-    var c2 = chartCard('Films by Release Year');
-    var vb = el('div', { class: 'vbars' });
-    YEARS.forEach(function (y) {
-      vb.appendChild(el('div', { class: 'vcol' }, [
-        el('div', { class: 'vval' }, yc[y]),
-        el('div', { class: 'vbar' + (yc[y] ? '' : ' empty'), style: 'height:' + (yc[y] / yMax * 100) + '%;min-height:' + (yc[y] ? 4 : 2) + 'px' }),
-        el('div', { class: 'vlabel' }, y)
-      ]));
-    });
-    c2.appendChild(vb); wrap.appendChild(c2);
-
-    // Top countries by box office
-    var bc = {}; fs.forEach(function (f) { bc[f.country] = (bc[f.country] || 0) + f.box; });
-    var bArr = Object.keys(bc).map(function (c) { return { name: c, box: bc[c] }; }).sort(function (a, b) { return b.box - a.box; }).slice(0, 8);
-    var bMax = Math.max.apply(null, [1].concat(bArr.map(function (c) { return c.box; })));
-    var c3 = chartCard('Top Countries by Box Office');
-    bArr.forEach(function (c) {
-      c3.appendChild(el('div', { class: 'hbar-row' }, [
-        el('div', { class: 'hbar-label' }, c.name),
-        el('div', { class: 'hbar-track' }, el('div', { class: 'hbar-fill', style: 'width:' + Math.max(6, c.box / bMax * 100) + '%' })),
-        el('div', { class: 'hbar-val' }, fmtMoney(c.box))
-      ]));
-    });
-    wrap.appendChild(c3);
-
-    // Rating distribution
-    var buckets = [{ label: '<7.0', min: 0, max: 7 }, { label: '7.0-7.5', min: 7, max: 7.5 }, { label: '7.5-8.0', min: 7.5, max: 8 }, { label: '8.0+', min: 8, max: 99 }];
-    buckets.forEach(function (b) { b.count = fs.filter(function (f) { return f.rating >= b.min && f.rating < b.max; }).length; });
-    var rMax = Math.max.apply(null, [1].concat(buckets.map(function (b) { return b.count; })));
-    var c4 = chartCard('Rating Distribution');
-    var rb = el('div', { class: 'rbars' });
+  function vbarChart(title, buckets, valueKey, fmtVal) {
+    var max = Math.max.apply(null, [1].concat(buckets.map(function (b) { return b[valueKey]; })));
+    var card = chartCard(title);
+    var bars = el('div', { class: 'rbars' });
     buckets.forEach(function (b) {
-      rb.appendChild(el('div', { class: 'vcol' }, [
-        el('div', { class: 'vval' }, b.count),
-        el('div', { class: 'vbar' + (b.count ? '' : ' empty'), style: 'width:46px;height:' + (b.count / rMax * 100) + '%;min-height:' + (b.count ? 4 : 2) + 'px' }),
+      var v = b[valueKey];
+      bars.appendChild(el('div', { class: 'vcol' }, [
+        el('div', { class: 'vval' }, fmtVal ? fmtVal(v) : v),
+        el('div', { class: 'vbar' + (v ? '' : ' empty'), style: 'width:46px;height:' + (v / max * 100) + '%;min-height:' + (v ? 4 : 2) + 'px' }),
         el('div', { class: 'vlabel' }, b.label)
       ]));
     });
-    c4.appendChild(rb); wrap.appendChild(c4);
+    card.appendChild(bars);
+    return card;
+  }
+
+  function renderCharts(fs) {
+    var wrap = $('charts-scroll'); wrap.innerHTML = '';
+
+    // ── Pair 1: Genre Distribution | Films by Decade ─────────────────────────
+    var gc = {}; fs.forEach(function (f) { gc[f.genre] = (gc[f.genre] || 0) + 1; });
+    var gArr = Object.keys(gc).map(function (g) { return { label: g, n: gc[g], color: colorOf(g) }; }).sort(function (a, b) { return b.n - a.n; });
+    wrap.appendChild(hbarChart('Genre Distribution', gArr));
+
+    var dc = {};
+    fs.forEach(function (f) { if (f.year != null) { var di = Math.floor((f.year - 1) / 10); dc[di] = (dc[di] || 0) + 1; } });
+    var allDI = YEARS.map(function (y) { return Math.floor((y - 1) / 10); });
+    var minDI = Math.min.apply(null, allDI), maxDI = Math.max.apply(null, allDI);
+    var decades = [];
+    for (var di = maxDI; di >= minDI; di--) {
+      var dStart = di * 10 + 1, dEnd = di === maxDI ? YEARS[YEARS.length - 1] : dStart + 9;
+      decades.push({ label: dStart + '–' + dEnd, n: dc[di] || 0 });
+    }
+    wrap.appendChild(hbarChart('Films by Decade', decades));
+
+    // ── Pair 2: Continent Distribution | Region Distribution ─────────────────
+    var cc = {}, rc = {};
+    fs.forEach(function (f) {
+      if (f.continent && f.continent !== 'Other') cc[f.continent] = (cc[f.continent] || 0) + 1;
+      if (f.region) rc[f.region] = (rc[f.region] || 0) + 1;
+    });
+    wrap.appendChild(hbarChart('Continent Distribution',
+      Object.keys(cc).map(function (k) { return { label: k, n: cc[k] }; }).sort(function (a, b) { return b.n - a.n; })));
+    wrap.appendChild(hbarChart('Region Distribution',
+      Object.keys(rc).map(function (k) { return { label: k, n: rc[k] }; }).sort(function (a, b) { return b.n - a.n; })));
+
+    // ── Pair 3: Rating Distribution ML | Rating Distribution IMDB ────────────
+    var mlBuckets = [
+      { label: '<3.5', min: 0,   max: 3.5 }, { label: '3.5–4.0', min: 3.5, max: 4.0 },
+      { label: '4.0–4.5', min: 4.0, max: 4.5 }, { label: '4.5+',  min: 4.5, max: 99  }
+    ];
+    mlBuckets.forEach(function (b) { b.count = fs.filter(function (f) { return f.ratingMl >= b.min && f.ratingMl < b.max; }).length; });
+    wrap.appendChild(vbarChart('Rating Distribution — ML', mlBuckets, 'count'));
+
+    var imBuckets = [
+      { label: '<7.0', min: 0, max: 7 }, { label: '7.0-7.5', min: 7, max: 7.5 },
+      { label: '7.5-8.0', min: 7.5, max: 8 }, { label: '8.0+', min: 8, max: 99 }
+    ];
+    imBuckets.forEach(function (b) { b.count = fs.filter(function (f) { return f.rating >= b.min && f.rating < b.max; }).length; });
+    wrap.appendChild(vbarChart('Rating Distribution — IMDB', imBuckets, 'count'));
+
+    // ── Pair 4: Oscars Winning by Continent | Oscars Winning by Region ────────
+    var oc = {}, or_ = {};
+    fs.forEach(function (f) {
+      if (f.oscars) {
+        if (f.continent && f.continent !== 'Other') oc[f.continent] = (oc[f.continent] || 0) + f.oscars;
+        if (f.region) or_[f.region] = (or_[f.region] || 0) + f.oscars;
+      }
+    });
+    wrap.appendChild(hbarChart('Oscars Winning by Continent',
+      Object.keys(oc).map(function (k) { return { label: k, n: oc[k] }; }).sort(function (a, b) { return b.n - a.n; })));
+    wrap.appendChild(hbarChart('Oscars Winning by Region',
+      Object.keys(or_).map(function (k) { return { label: k, n: or_[k] }; }).sort(function (a, b) { return b.n - a.n; })));
+
+    // ── Pair 5: Other Awards by Continent | Other Awards by Region ────────────
+    var awc = {}, awr = {};
+    fs.forEach(function (f) {
+      if (f.otherAwards) {
+        if (f.continent && f.continent !== 'Other') awc[f.continent] = (awc[f.continent] || 0) + f.otherAwards;
+        if (f.region) awr[f.region] = (awr[f.region] || 0) + f.otherAwards;
+      }
+    });
+    wrap.appendChild(hbarChart('Other Awards by Continent',
+      Object.keys(awc).map(function (k) { return { label: k, n: awc[k] }; }).sort(function (a, b) { return b.n - a.n; })));
+    wrap.appendChild(hbarChart('Other Awards by Region',
+      Object.keys(awr).map(function (k) { return { label: k, n: awr[k] }; }).sort(function (a, b) { return b.n - a.n; })));
+
+    // ── Single: MovieLens Votes by Rating (full width) ────────────────────────
+    if (RATINGS_DIST.length) {
+      var mlMax = Math.max.apply(null, RATINGS_DIST.map(function (d) { return d.votes; }));
+      var cml = chartCard('MovieLens Votes by Rating');
+      cml.style.gridColumn = '1 / -1';
+      var mlb = el('div', { class: 'vbars' });
+      RATINGS_DIST.forEach(function (d) {
+        mlb.appendChild(el('div', { class: 'vcol' }, [
+          el('div', { class: 'vval' }, fmtVotes(d.votes)),
+          el('div', { class: 'vbar', style: 'height:' + (d.votes / mlMax * 100) + '%;min-height:4px' }),
+          el('div', { class: 'vlabel' }, d.rating.toFixed(1))
+        ]));
+      });
+      cml.appendChild(mlb); wrap.appendChild(cml);
+    }
   }
   function chartCard(title) { return el('div', { class: 'chart-card' }, [el('div', { class: 'chart-title' }, title)]); }
 
   /* ---------------- Table ---------------- */
   var COLUMNS = [
-    { key: 'title', label: 'Title' }, { key: 'director', label: 'Director' }, { key: 'year', label: 'Year' },
-    { key: 'country', label: 'Country' }, { key: 'genre', label: 'Genre' }, { key: 'rating', label: 'Rating' },
-    { key: 'box', label: 'Box', right: true }
+    { key: 'title',       label: 'Title' },
+    { key: 'director',    label: 'Director' },
+    { key: 'year',        label: 'Year',        right: true },
+    { key: 'country',     label: 'Country' },
+    { key: 'genre',       label: 'Genre' },
+    { key: 'rating',      label: 'IMDb ★',  right: true },
+    { key: 'ratingMl',    label: 'ML ★',    right: true },
+    { key: 'votesMl',     label: 'ML Votes',    right: true },
+    { key: 'box',         label: 'Box',         right: true },
+    { key: 'oscars',      label: 'Oscars',      right: true },
+    { key: 'otherAwards', label: 'Awards',      right: true }
   ];
   function renderTable(fs) {
     // Sort
@@ -503,11 +569,15 @@
         body.appendChild(el('div', { class: 'trow' }, [
           el('div', { class: 'cell b' }, f.title),
           el('div', { class: 'cell muted' }, f.director),
-          el('div', { class: 'cell mono' }, f.year),
+          el('div', { class: 'cell mono right' }, f.year),
           el('div', { class: 'cell muted' }, f.country),
           el('div', { class: 'cell genre' }, [el('span', { class: 'gdot', style: 'background:' + colorOf(f.genre) }), f.genre]),
-          el('div', { class: 'cell bold' }, '\u2605 ' + f.rating.toFixed(1)),
-          el('div', { class: 'cell mono right' }, fmtMoney(f.box))
+          el('div', { class: 'cell bold right' }, '\u2605 ' + f.rating.toFixed(1)),
+          el('div', { class: 'cell mono right' }, f.ratingMl ? '\u2605 ' + f.ratingMl.toFixed(1) : '\u2013'),
+          el('div', { class: 'cell mono right' }, f.votesMl ? fmtVotes(f.votesMl) : '\u2013'),
+          el('div', { class: 'cell mono right' }, fmtMoney(f.box)),
+          el('div', { class: 'cell mono right' }, f.oscars || '\u2013'),
+          el('div', { class: 'cell mono right' }, f.otherAwards || '\u2013')
         ]));
       });
     }
@@ -541,54 +611,126 @@
       var list = groups[c];
       var top = list.slice().sort(function (a, b) { return b.rating - a.rating; })[0];
       var avg = list.reduce(function (a, f) { return a + f.rating; }, 0) / list.length;
-      return { country: c, count: list.length, top: top ? top.title : '\u2014', rating: avg.toFixed(1), box: fmtMoney(list.reduce(function (a, f) { return a + f.box; }, 0)) };
+      return {
+        country: c,
+        count: list.length,
+        votesMl: list.reduce(function (a, f) { return a + f.votesMl; }, 0),
+        top: top ? top.title : '\u2014',
+        rating: avg.toFixed(1),
+        box: fmtMoney(list.reduce(function (a, f) { return a + f.box; }, 0))
+      };
     });
   }
 
+  function computeDirBubbles(fs) {
+    var groups = {};
+    fs.forEach(function (f) {
+      var c = f.dir.country || f.country;
+      var g = groups[c] = groups[c] || { country: c, count: 0, names: {} };
+      g.count++;
+      if (f.director) g.names[f.director] = (g.names[f.director] || 0) + 1;
+    });
+    return Object.keys(groups).map(function (c) {
+      var g = groups[c];
+      var top = Object.keys(g.names).sort(function (a, b) { return g.names[b] - g.names[a]; })[0] || '—';
+      return { country: c, count: g.count, top: top };
+    });
+  }
+
+  function computeWriBubbles(fs) {
+    var groups = {};
+    fs.forEach(function (f) {
+      var c = f.wri.country || f.country;
+      var g = groups[c] = groups[c] || { country: c, count: 0, names: {} };
+      g.count++;
+      if (f.wri.name) g.names[f.wri.name] = (g.names[f.wri.name] || 0) + 1;
+    });
+    return Object.keys(groups).map(function (c) {
+      var g = groups[c];
+      var top = Object.keys(g.names).sort(function (a, b) { return g.names[b] - g.names[a]; })[0] || '—';
+      return { country: c, count: g.count, top: top };
+    });
+  }
+
+  function dirTipFn(entry) {
+    return '<div class="tt-title">' + entry.country + '</div>' +
+      '<div class="tt-row"><span>Directors</span><b>' + entry.count + '</b></div>' +
+      '<div class="tt-top">Notable: ' + entry.top + '</div>';
+  }
+
+  function wriTipFn(entry) {
+    return '<div class="tt-title">' + entry.country + '</div>' +
+      '<div class="tt-row"><span>Writers</span><b>' + entry.count + '</b></div>' +
+      '<div class="tt-top">Notable: ' + entry.top + '</div>';
+  }
+
   function ensureMap() {
-    var holder = $('map-holder');
-    if (!_ro) { _ro = new ResizeObserver(function () { drawMap(); }); _ro.observe(holder); }
+    var h1 = $('map-holder'), h2 = $('map-holder-votes');
+    var h3 = $('map-holder-dir'), h4 = $('map-holder-wri');
     if (!window.d3 || !window.topojson) { setTimeout(ensureMap, 120); return; }
+    if (!_ro)  { _ro  = new ResizeObserver(function () { drawMap('map-holder',       'tooltip',       'count',   'films'); }); _ro.observe(h1); }
+    if (!_ro2) { _ro2 = new ResizeObserver(function () { drawMap('map-holder-votes', 'tooltip-votes', 'votesMl', 'ML votes', '--map-green', '--map-green-faint'); }); _ro2.observe(h2); }
+    if (!_ro3 && h3) { _ro3 = new ResizeObserver(function () { drawMap('map-holder-dir', 'tooltip-dir', 'count', 'directors', '--map-purple', '--map-purple-faint', _dirBubbles, dirTipFn); }); _ro3.observe(h3); }
+    if (!_ro4 && h4) { _ro4 = new ResizeObserver(function () { drawMap('map-holder-wri', 'tooltip-wri', 'count', 'writers',   '--map-teal',   '--map-teal-faint',   _wriBubbles, wriTipFn); }); _ro4.observe(h4); }
     if (!_world && !_worldLoading) {
       _worldLoading = true;
       fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json')
         .then(function (r) { return r.json(); })
-        .then(function (topo) { _world = window.topojson.feature(topo, topo.objects.countries).features; drawMap(); })
+        .then(function (topo) {
+          _world = window.topojson.feature(topo, topo.objects.countries).features;
+          drawAllMaps();
+        })
         .catch(function () {});
     }
-    drawMap();
+    drawAllMaps();
   }
 
-  function drawMap() {
-    var holder = $('map-holder');
+  function drawAllMaps() {
+    drawMap('map-holder',       'tooltip',       'count',   'films');
+    drawMap('map-holder-votes', 'tooltip-votes', 'votesMl', 'ML votes', '--map-green',  '--map-green-faint');
+    drawMap('map-holder-dir',   'tooltip-dir',   'count',   'directors', '--map-purple', '--map-purple-faint', _dirBubbles, dirTipFn);
+    drawMap('map-holder-wri',   'tooltip-wri',   'count',   'writers',   '--map-teal',   '--map-teal-faint',   _wriBubbles, wriTipFn);
+  }
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function drawMap(holderId, tooltipId, valueKey, maxLabel, colorVar, faintVar, bubblesData, tipFn) {
+    var holder = $(holderId);
     if (!holder || !window.d3) return;
     var w = holder.clientWidth, h = holder.clientHeight;
     if (!w || !h) return;
     var d3 = window.d3;
-    var accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#efa838').trim();
+    var accent    = cssVar(colorVar || '--accent') || '#efa838';
+    var sphere    = cssVar('--map-sphere');
+    var sphereS   = cssVar('--map-sphere-s');
+    var grid      = cssVar('--map-grid');
+    var empty     = cssVar('--map-empty');
+    var border    = cssVar('--map-border');
+    var labelClr  = cssVar('--map-label');
+    var legendClr = cssVar('--map-legend');
+    var accentFaint = cssVar(faintVar || '--map-accent-faint') || 'rgba(239,168,56,.1)';
+
     holder.innerHTML = '';
     var svg = d3.select(holder).append('svg').attr('width', w).attr('height', h).attr('viewBox', '0 0 ' + w + ' ' + h);
     var projection = d3.geoNaturalEarth1().fitExtent([[14, 14], [w - 14, h - 14]], { type: 'Sphere' });
     var path = d3.geoPath(projection);
 
-    svg.append('path').attr('d', path({ type: 'Sphere' })).attr('fill', 'rgba(255,255,255,0.012)').attr('stroke', 'rgba(255,255,255,0.05)').attr('stroke-width', 0.6);
-    svg.append('path').attr('d', path(d3.geoGraticule10())).attr('fill', 'none').attr('stroke', 'rgba(255,255,255,0.035)').attr('stroke-width', 0.5);
+    svg.append('path').attr('d', path({ type: 'Sphere' })).attr('fill', sphere).attr('stroke', sphereS).attr('stroke-width', 0.6);
+    svg.append('path').attr('d', path(d3.geoGraticule10())).attr('fill', 'none').attr('stroke', grid).attr('stroke-width', 0.5);
 
     if (!_world) return;
 
-    // country name \u2192 aggregated data
+    var data = bubblesData || _bubbles;
     var byName = {};
-    _bubbles.forEach(function (b) { byName[b.country] = b; });
+    data.forEach(function (b) { byName[b.country] = b; });
 
-    var max = d3.max(_bubbles, function (b) { return b.count; }) || 1;
-    // sqrt scale compresses the skewed distribution (US >> others)
+    var max = d3.max(data, function (b) { return b[valueKey]; }) || 1;
     var colorScale = d3.scaleSequentialSqrt()
       .domain([0, max])
-      .interpolator(d3.interpolate('rgba(239,168,56,0.06)', accent));
+      .interpolator(d3.interpolate(accentFaint, accent));
 
-    var tip = $('tooltip');
+    var tip = $(tooltipId);
 
-    // Choropleth: fill each country by film count
     svg.append('g').selectAll('path')
       .data(_world)
       .join('path')
@@ -596,9 +738,9 @@
       .attr('fill', function (d) {
         var name = ISO_NUM[+d.id];
         var entry = name ? byName[name] : null;
-        return entry ? colorScale(entry.count) : 'rgba(255,255,255,0.04)';
+        return entry ? colorScale(entry[valueKey]) : empty;
       })
-      .attr('stroke', 'rgba(255,255,255,0.12)')
+      .attr('stroke', border)
       .attr('stroke-width', 0.4)
       .style('cursor', function (d) { return ISO_NUM[+d.id] && byName[ISO_NUM[+d.id]] ? 'pointer' : 'default'; })
       .on('mousemove', function (event, d) {
@@ -608,8 +750,10 @@
         var p = d3.pointer(event, holder);
         tip.style.display = 'block';
         tip.style.left = p[0] + 'px'; tip.style.top = p[1] + 'px'; tip.style.transform = 'translate(14px,-50%)';
-        tip.innerHTML = '<div class="tt-title">' + entry.country + '</div>' +
+        tip.innerHTML = tipFn ? tipFn(entry) :
+          '<div class="tt-title">' + entry.country + '</div>' +
           '<div class="tt-row"><span>Films</span><b>' + entry.count + '</b></div>' +
+          '<div class="tt-row"><span>ML votes</span><b>' + fmtVotes(entry.votesMl) + '</b></div>' +
           '<div class="tt-row"><span>Avg rating</span><b>\u2605 ' + entry.rating + '</b></div>' +
           '<div class="tt-row"><span>Box office</span><b>' + entry.box + '</b></div>' +
           '<div class="tt-top">Top: ' + entry.top + '</div>';
@@ -621,24 +765,20 @@
     svg.append('g').selectAll('text').data(labels).join('text')
       .attr('transform', function (d) { var p = projection([d[1], d[2]]); return 'translate(' + p[0] + ',' + p[1] + ')'; })
       .text(function (d) { return d[0]; }).attr('text-anchor', 'middle').attr('dy', '0.3em')
-      .attr('fill', 'rgba(255,255,255,0.14)').attr('font-size', 10).attr('letter-spacing', 2.5)
+      .attr('fill', labelClr).attr('font-size', 10).attr('letter-spacing', 2.5)
       .attr('font-family', 'JetBrains Mono, monospace').style('pointer-events', 'none');
 
-    // Color legend (gradient ramp)
+    // Color legend
+    var gradId = 'choro-grad-' + holderId;
     var lw = 120, lh = 8, lx = w - lw - 16, ly = h - 24;
     var defs = svg.append('defs');
-    var grad = defs.append('linearGradient').attr('id', 'choro-grad');
-    grad.append('stop').attr('offset', '0%').attr('stop-color', 'rgba(239,168,56,0.12)');
+    var grad = defs.append('linearGradient').attr('id', gradId);
+    grad.append('stop').attr('offset', '0%').attr('stop-color', accentFaint);
     grad.append('stop').attr('offset', '100%').attr('stop-color', accent);
     var lg = svg.append('g').attr('transform', 'translate(' + lx + ',' + ly + ')');
-    lg.append('rect').attr('width', lw).attr('height', lh).attr('rx', 2)
-      .attr('fill', 'url(#choro-grad)').attr('opacity', 0.9);
-    var fmt = function (n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); };
-    lg.append('text').attr('x', 0).attr('y', lh + 11).attr('fill', 'rgba(255,255,255,0.45)')
-      .attr('font-size', 9).attr('font-family', 'JetBrains Mono, monospace').text('0');
-    lg.append('text').attr('x', lw).attr('y', lh + 11).attr('text-anchor', 'end')
-      .attr('fill', 'rgba(255,255,255,0.45)').attr('font-size', 9)
-      .attr('font-family', 'JetBrains Mono, monospace').text(fmt(max) + ' films');
+    lg.append('rect').attr('width', lw).attr('height', lh).attr('rx', 2).attr('fill', 'url(#' + gradId + ')').attr('opacity', 0.9);
+    lg.append('text').attr('x', 0).attr('y', lh + 11).attr('fill', legendClr).attr('font-size', 9).attr('font-family', 'JetBrains Mono, monospace').text('0');
+    lg.append('text').attr('x', lw).attr('y', lh + 11).attr('text-anchor', 'end').attr('fill', legendClr).attr('font-size', 9).attr('font-family', 'JetBrains Mono, monospace').text(fmtVotes(max) + ' ' + maxLabel);
   }
 
   /* ---------------- Tabs & init ---------------- */
@@ -651,7 +791,26 @@
     render();
   }
 
+  var SUN_SVG = '<path d="M12 4.5V3m0 18v-1.5M4.5 12H3m18 0h-1.5M6.34 6.34 5.28 5.28m13.44 13.44-1.06-1.06M6.34 17.66l-1.06 1.06M18.72 5.28l-1.06 1.06"/><circle cx="12" cy="12" r="4"/>';
+  var MOON_SVG = '<path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/>';
+
+  function applyTheme(dark) {
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    var icon = $('theme-icon');
+    if (icon) icon.innerHTML = dark ? MOON_SVG : SUN_SVG;
+    if (state.tab === 'map') { drawAllMaps(); }
+  }
+
   function init() {
+    // Theme toggle
+    var isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+    applyTheme(isDark);
+    $('theme-btn').addEventListener('click', function () {
+      isDark = !isDark;
+      localStorage.setItem('cinemap-theme', isDark ? 'dark' : 'light');
+      applyTheme(isDark);
+    });
+
     buildSidebar();
     Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
       b.addEventListener('click', function () { setTab(b.getAttribute('data-tab')); });
@@ -677,14 +836,15 @@
     overlay.appendChild(msg); overlay.appendChild(dots);
     document.body.appendChild(overlay);
 
-    fetch('/api/films')
-      .then(function(r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function(data) {
+    Promise.all([
+      fetch('/api/films').then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+      fetch('/api/ratings-dist').then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    ])
+      .then(function(results) {
+        var data = results[0];
+        RATINGS_DIST = results[1];
         FILMS = data;
-        YEARS = Array.prototype.slice.call(
+        YEARS = Array.from(
           new Set(FILMS.map(function(f) { return f.year; }).filter(function(y) { return y != null; }))
         ).sort(function(a, b) { return a - b; });
 
@@ -704,7 +864,6 @@
           regs:      derivedRegs.length  ? derivedRegs  : uniqSort(rows.map(function(r) { return r[2]; })),
           countries: derivedCntrs.length ? derivedCntrs : rows.map(function(r) { return r[0]; }).sort(function(a, b) { return a.localeCompare(b); })
         };
-
         document.body.removeChild(overlay);
         init();
       })

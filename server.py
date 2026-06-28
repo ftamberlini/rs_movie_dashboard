@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import oracledb
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
@@ -124,6 +125,12 @@ WITH
     FROM movie_writer mw
     JOIN writer w ON w.WRITERID = mw.WRITERID
     JOIN m        ON m.IMDBID   = mw.IMDBID
+  ),
+  fv AS (
+    SELECT m.MOVIEID, SUM(mr.COUNT_RATING) AS VOTES_ML
+    FROM movie_rating mr
+    JOIN m ON m.MOVIEID = mr.MOVIEID
+    GROUP BY m.MOVIEID
   )
 SELECT
   m.IMDBID, m.TITLE, m.YEAR,
@@ -145,19 +152,36 @@ SELECT
   fw.GENDER      AS WRI_GENDER,
   fw.RACE        AS WRI_RACE,
   fw.BIRTHYEAR   AS WRI_BY,
-  fw.NATIONALITY AS WRI_NAT
+  fw.NATIONALITY AS WRI_NAT,
+  fv.VOTES_ML
 FROM m
 LEFT JOIN fc ON fc.IMDBID  = m.IMDBID  AND fc.rn = 1
 LEFT JOIN fg ON fg.MOVIEID = m.MOVIEID AND fg.rn = 1
 LEFT JOIN fi ON fi.IMDBID  = m.IMDBID  AND fi.rn = 1
 LEFT JOIN fd ON fd.IMDBID  = m.IMDBID  AND fd.rn = 1
 LEFT JOIN fw ON fw.IMDBID  = m.IMDBID  AND fw.rn = 1
+LEFT JOIN fv ON fv.MOVIEID = m.MOVIEID
 ORDER BY m.TITLE
 """
 
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 _FILMS: list[dict] = []
+_RATINGS_DIST: list[dict] = []
+
+
+def _load_ratings_dist() -> list[dict]:
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT RATING, SUM(COUNT_RATING) AS VOTES"
+            " FROM movie_rating"
+            " GROUP BY RATING"
+            " ORDER BY RATING"
+        )
+        result = [{"rating": float(r[0]), "votes": int(r[1])} for r in cur.fetchall()]
+    conn.close()
+    return result
 
 
 def _load_films() -> list[dict]:
@@ -226,7 +250,7 @@ def _load_films() -> list[dict]:
                 "ratingImdb":  rating,
                 "ratingMl":    round(rating / 2.0, 1),
                 "votesImdb":   _int(r["IMDBVOTES"]),
-                "votesMl":     0,
+                "votesMl":     int(r["VOTES_ML"]) if r["VOTES_ML"] else 0,
                 "oscars":      osc_w,
                 "otherAwards": other_awards,
                 "dir": {
@@ -255,13 +279,15 @@ def _load_films() -> list[dict]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _FILMS
+    global _FILMS, _RATINGS_DIST
     print("[CineMap] Loading films from Oracle…")
     _FILMS = _load_films()
+    _RATINGS_DIST = _load_ratings_dist()
     yield
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -273,6 +299,11 @@ app.add_middleware(
 @app.get("/api/films")
 def api_films():
     return _FILMS
+
+
+@app.get("/api/ratings-dist")
+def api_ratings_dist():
+    return _RATINGS_DIST
 
 
 @app.get("/api/reload")
