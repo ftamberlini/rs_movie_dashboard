@@ -2,3 +2,4 @@ oracle
 data/
 __pycache__/
 .env
+deploy/

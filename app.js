@@ -18,6 +18,9 @@
   var RACE_COLORS = {WHITE:'#cdbba0',ASIAN:'#e0b54a',BLACK:'#7a5a48',INDIGENOUS:'#cf6a3c','MIXED-RACE':'#b98a5e',UNKNOWN:'#8b97a8'};
   var MALE_C = '#34a9e0', FEMALE_C = '#ef5b7b';
 
+  var LOC_TYPES = ['Country', 'City', 'State', 'Region', 'Other'];
+  var LOC_TYPE_COLORS = { Country: '#efa838', City: '#5b9bf0', State: '#3fbf9a', Region: '#a06bf0', Other: '#9aa6b8' };
+
   var COORDS = {
     // North America
     'United States':{lng:-98.6,lat:39.8},'Canada':{lng:-106,lat:56},'Mexico':{lng:-102,lat:23.5},
@@ -90,6 +93,8 @@
   };
 
   var FILMS = []; // populated from /api/films on load
+  var LOC_DATA = []; // populated from /api/locations on load
+  var THEME_DATA = []; // populated from /api/themes on load
 
   /* Option data from country-data.js (fallback to film-derived) */
   function optionData() {
@@ -112,13 +117,26 @@
   /* ---------------- State ---------------- */
   var PAGE_SIZE = 50;
   var state = {
-    tab: 'map', search: '',
+    tab: 'map', search: '', searchDir: '', searchWri: '',
     mlGenres: [], imdbGenres: [], years: [], continents: [], regions: [], countries: [],
     dirGenders: [], dirRaces: [], dirRegions: [], dirCountries: [],
     wriGenders: [], wriRaces: [], wriRegions: [], wriCountries: [],
-    open: { film: true, director: false, writer: false },
+    open: { film: true, director: false, writer: false, location: false, theme: false },
     sortKey: 'title', sortDir: 'asc',
-    tablePage: 0
+    tablePage: 0,
+    dirSortKey: 'count', dirSortDir: 'desc', dirPage: 0,
+    wriSortKey: 'count', wriSortDir: 'desc', wriPage: 0,
+    locSearch: { Country: '', City: '', State: '', Region: '', Other: '' },
+    locSortKey: 'mentions', locSortDir: 'desc', locPage: 0,
+    themeSearch: { idiom: '', theme: '', word: '' },
+    themeSortKey: 'mentions', themeSortDir: 'desc', themePage: 0,
+    themeOptions:     null,  // loaded from /api/themes/options
+    themeFilterIds:   null,  // {imdbid: true} or null
+    themeFilterRows:  [],    // current page of table rows from server
+    themeFilterTotal: 0,
+    themeMapData:     {},    // {country: mentions}
+    themeChartData:   [],    // [{theme, n}]
+    themeLoading:     false
   };
   var OD = optionData();
 
@@ -143,12 +161,97 @@
   function fmtVotes(n) { if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'; return String(n); }
   function colorOf(g) { return GENRE_COLORS[g] || '#9aa6b8'; }
   function $(id) { return document.getElementById(id); }
+  function toTitleCase(s) {
+    return (s || '').toLowerCase().replace(/(?:^|[\s\-\/])(\S)/g, function(m, c) { return m.slice(0, -1) + c.toUpperCase(); });
+  }
 
   /* ---------------- Filtering ---------------- */
+  function getLocFilteredIds() {
+    var anyActive = LOC_TYPES.some(function (t) { return state.locSearch[t].trim(); });
+    if (!anyActive || !LOC_DATA.length) return null;
+    var ids = {};
+    LOC_DATA.forEach(function (r) {
+      var s = (state.locSearch[r.locType] || '').trim().toLowerCase();
+      if (s && r.location.toLowerCase().indexOf(s) >= 0) ids[r.imdbid] = true;
+    });
+    return ids;
+  }
+
+  function getThemeFilteredIds() {
+    return state.themeFilterIds;
+  }
+
+  function _themeFilterUrl(page) {
+    var s = state;
+    return '/api/themes/filter'
+      + '?idiom='  + encodeURIComponent(s.themeSearch.idiom)
+      + '&theme='  + encodeURIComponent(s.themeSearch.theme)
+      + '&word='   + encodeURIComponent(s.themeSearch.word)
+      + '&sort='   + encodeURIComponent(s.themeSortKey)
+      + '&dir='    + encodeURIComponent(s.themeSortDir)
+      + '&page='   + (page != null ? page : s.themePage)
+      + '&size='   + PAGE_SIZE;
+  }
+
+  function loadThemeOptions() {
+    fetch('/api/themes/options')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        state.themeOptions = data;
+        if (state.tab === 'theme') render();
+      })
+      .catch(function () {});
+  }
+
+  function loadThemeFilter(page) {
+    var idiom = state.themeSearch.idiom.trim();
+    var theme = state.themeSearch.theme.trim();
+    var word  = state.themeSearch.word.trim();
+
+    if (!idiom && !theme && !word) {
+      state.themeFilterIds   = null;
+      state.themeFilterRows  = [];
+      state.themeFilterTotal = 0;
+      state.themeMapData     = {};
+      state.themeChartData   = [];
+      state.themeLoading     = false;
+      render();
+      return;
+    }
+
+    if (page != null) state.themePage = page;
+    state.themeLoading = true;
+    render();
+
+    fetch(_themeFilterUrl())
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var ids = {};
+        (data.film_ids || []).forEach(function (id) { ids[id] = true; });
+        state.themeFilterIds   = Object.keys(ids).length ? ids : null;
+        state.themeFilterRows  = data.rows || [];
+        state.themeFilterTotal = data.total || 0;
+        state.themeMapData     = data.country_mentions || {};
+        state.themeChartData   = data.theme_stats || [];
+        state.themeLoading     = false;
+        render();
+      })
+      .catch(function () { state.themeLoading = false; render(); });
+  }
+
   function filterFilms() {
-    var s = state, q = (s.search || '').trim().toLowerCase();
+    var locIds   = getLocFilteredIds();
+    var themeIds = getThemeFilteredIds();
+    var s = state;
+    var q   = (s.search    || '').trim().toLowerCase();
+    var qd  = (s.searchDir || '').trim().toLowerCase();
+    var qw  = (s.searchWri || '').trim().toLowerCase();
     return FILMS.filter(function (f) {
-      if (q && f.title.toLowerCase().indexOf(q) < 0 && f.director.toLowerCase().indexOf(q) < 0) return false;
+      if (locIds   && !locIds[f.imdbid])   return false;
+      if (themeIds && !themeIds[f.imdbid]) return false;
+      if (q  && f.title.toLowerCase().indexOf(q) < 0) return false;
+      if (qd && (f.director || '').toLowerCase().indexOf(qd) < 0) return false;
+      if (qw && (f.wri.name || '').toLowerCase().indexOf(qw) < 0) return false;
       if (s.mlGenres.length && s.mlGenres.indexOf(f.mlGenre) < 0) return false;
       if (s.imdbGenres.length && s.imdbGenres.indexOf(f.imdbGenre) < 0) return false;
       if (s.years.length && s.years.indexOf(f.year) < 0) return false;
@@ -181,12 +284,12 @@
     root.appendChild(groupHeader('film', 'FILM'));
     root.appendChild(filmBody);
     filmBody.appendChild(el('input', {
-      class: 'search', placeholder: 'Search film or director...',
+      id: 'search-film', class: 'search', placeholder: 'Search film title...',
       oninput: function (e) { state.search = e.target.value; render(); }
     }));
     addFilter(filmBody, 'years', 'RELEASE YEAR', function () { return YEARS; }, true);
-    addFilter(filmBody, 'mlGenres', 'GENRE \u00B7 MOVIELENS', function () { return ML_GENRES; });
-    addFilter(filmBody, 'imdbGenres', 'GENRE \u00B7 IMDB', function () { return IMDB_GENRES; });
+    addFilter(filmBody, 'mlGenres', 'GENRE · MOVIELENS', function () { return ML_GENRES; });
+    addFilter(filmBody, 'imdbGenres', 'GENRE · IMDB', function () { return IMDB_GENRES; });
     addFilter(filmBody, 'continents', 'CONTINENT', function () { return OD.conts; });
     addFilter(filmBody, 'regions', 'REGION', function () { return OD.regs; });
     addFilter(filmBody, 'countries', 'COUNTRY', function () { return OD.countries; });
@@ -195,6 +298,10 @@
     var dirBody = el('div', { class: 'group-body collapsed' });
     root.appendChild(groupHeader('director', 'DIRECTOR'));
     root.appendChild(dirBody);
+    dirBody.appendChild(el('input', {
+      id: 'search-dir', class: 'search', placeholder: 'Search director name...',
+      oninput: function (e) { state.searchDir = e.target.value; render(); }
+    }));
     addFilter(dirBody, 'dirGenders', 'Gender', function () { return GENDERS; });
     addFilter(dirBody, 'dirRaces', 'Race', function () { return RACES; });
     addFilter(dirBody, 'dirRegions', 'Region', function () { return OD.regs; });
@@ -204,23 +311,80 @@
     var wriBody = el('div', { class: 'group-body collapsed' });
     root.appendChild(groupHeader('writer', 'WRITER'));
     root.appendChild(wriBody);
+    wriBody.appendChild(el('input', {
+      id: 'search-wri', class: 'search', placeholder: 'Search writer name...',
+      oninput: function (e) { state.searchWri = e.target.value; render(); }
+    }));
     addFilter(wriBody, 'wriGenders', 'Gender', function () { return GENDERS; });
     addFilter(wriBody, 'wriRaces', 'Race', function () { return RACES; });
     addFilter(wriBody, 'wriRegions', 'Region', function () { return OD.regs; });
     addFilter(wriBody, 'wriCountries', 'Country', function () { return OD.countries; });
 
+    // LOCATION group — 5 typed inputs with datalists
+    var locBody = el('div', { class: 'group-body collapsed' });
+    root.appendChild(groupHeader('location', 'LOCATION'));
+    root.appendChild(locBody);
+    LOC_TYPES.forEach(function (typ) {
+      var dlId = 'dl-loc-' + typ.toLowerCase();
+      var inpId = 'search-loc-' + typ.toLowerCase();
+      var typeColor = LOC_TYPE_COLORS[typ] || '#9aa6b8';
+      var inp = el('input', {
+        id: inpId, list: dlId, class: 'search',
+        placeholder: typ + '...',
+        style: 'border-color:' + typeColor + '55',
+        oninput: function (e) { state.locSearch[typ] = e.target.value; state.locPage = 0; render(); }
+      });
+      var dl = el('datalist', { id: dlId });
+      var lbl = el('div', { class: 'field-label', style: 'color:' + typeColor }, typ);
+      locBody.appendChild(el('div', { class: 'field' }, [lbl, inp, dl]));
+    });
+
+    // THEME group
+    var themeBody = el('div', { class: 'group-body collapsed' });
+    root.appendChild(groupHeader('theme', 'THEME'));
+    root.appendChild(themeBody);
+
+    function makeThemeField(labelText, selId, onChange) {
+      var field = el('div', { class: 'field' });
+      field.appendChild(el('div', { class: 'field-label' }, labelText));
+      var sel = el('select', { id: selId });
+      sel.appendChild(new Option('All', ''));
+      sel.addEventListener('change', function () { onChange(sel.value); });
+      field.appendChild(el('div', { class: 'select-wrap' }, [sel, el('span', { class: 'chev-down', html: '&#9662;' })]));
+      themeBody.appendChild(field);
+      return sel;
+    }
+
+    makeThemeField('IDIOM', 'theme-idiom-sel', function (v) {
+      state.themeSearch.idiom = v;
+      state.themeSearch.theme = ''; state.themeSearch.word = '';
+      state.themePage = 0; loadThemeFilter();
+    });
+
+    makeThemeField('THEME', 'theme-theme-sel', function (v) {
+      state.themeSearch.theme = v;
+      state.themeSearch.word  = '';
+      state.themePage = 0; loadThemeFilter();
+    });
+
+    makeThemeField('WORD', 'theme-word-sel', function (v) {
+      state.themeSearch.word = v; state.themePage = 0; loadThemeFilter();
+    });
+
     groupRefs.film.body = filmBody;
     groupRefs.director.body = dirBody;
     groupRefs.writer.body = wriBody;
+    groupRefs.location.body = locBody;
+    groupRefs.theme.body = themeBody;
   }
 
   function groupHeader(key, label) {
     var badge = el('span', { class: 'group-badge', style: 'display:none' }, '0');
-    var chev = el('span', { class: 'chev' }, state.open[key] ? '\u25BE' : '\u25B8');
+    var chev = el('span', { class: 'chev' }, state.open[key] ? '▾' : '▸');
     var head = el('div', { class: 'group-header', onclick: function () {
       state.open[key] = !state.open[key];
       groupRefs[key].body.classList.toggle('collapsed', !state.open[key]);
-      chev.textContent = state.open[key] ? '\u25BE' : '\u25B8';
+      chev.textContent = state.open[key] ? '▾' : '▸';
     } }, [
       el('div', { class: 'group-left' }, [el('span', { class: 'group-name' }, label), badge]),
       chev
@@ -252,7 +416,7 @@
       var all = allFn();
       // options
       select.innerHTML = '';
-      select.appendChild(new Option(sel.length ? 'Add\u2026' : 'Select\u2026', ''));
+      select.appendChild(new Option(sel.length ? 'Add…' : 'Select…', ''));
       all.forEach(function (x) { if (sel.indexOf(numeric ? x : x) < 0) select.appendChild(new Option(String(x), String(x))); });
       select.value = '';
       // chips
@@ -268,7 +432,7 @@
   }
 
   /* ---------------- Render ---------------- */
-  var _bubbles = [], _dirBubbles = [], _wriBubbles = [], _world = null, _worldLoading = false, _ro = null, _ro2 = null, _ro3 = null, _ro4 = null, _lastSig = null;
+  var _bubbles = [], _dirBubbles = [], _wriBubbles = [], _locBubbles = [], _themeBubbles = [], _world = null, _worldLoading = false, _ro = null, _ro2 = null, _ro3 = null, _ro4 = null, _ro5 = null, _ro6 = null, _lastSig = null;
 
   function render() {
     var fs = filterFilms();
@@ -288,9 +452,11 @@
     $('st-oth').textContent = sum(fs, 'otherAwards');
 
     // group badges
-    setBadge('film', (state.search ? 1 : 0) + cnt(['mlGenres','imdbGenres','years','continents','regions','countries']));
-    setBadge('director', cnt(['dirGenders','dirRaces','dirRegions','dirCountries']));
-    setBadge('writer', cnt(['wriGenders','wriRaces','wriRegions','wriCountries']));
+    setBadge('film',     (state.search    ? 1 : 0) + cnt(['mlGenres','imdbGenres','years','continents','regions','countries']));
+    setBadge('director', (state.searchDir ? 1 : 0) + cnt(['dirGenders','dirRaces','dirRegions','dirCountries']));
+    setBadge('writer',   (state.searchWri ? 1 : 0) + cnt(['wriGenders','wriRaces','wriRegions','wriCountries']));
+    setBadge('location', LOC_TYPES.reduce(function (n, t) { return n + (state.locSearch[t] ? 1 : 0); }, 0));
+    setBadge('theme', (state.themeSearch.idiom ? 1 : 0) + (state.themeSearch.theme ? 1 : 0) + (state.themeSearch.word ? 1 : 0));
 
     // filters
     filterUpdaters.forEach(function (u) { u(); });
@@ -301,8 +467,12 @@
     _wriBubbles = computeWriBubbles(fs);
 
     // tab content
-    if (state.tab === 'map') { renderDist(fs); renderDiversity(fs); ensureMap(); }
+    if (state.tab === 'map') { renderDist(fs); renderDiversity(fs); ensureMap(); renderTopPersonCharts(); }
     else if (state.tab === 'charts') renderCharts(fs);
+    else if (state.tab === 'director') { state.dirPage = 0; renderDirTable(fs); }
+    else if (state.tab === 'writer') { state.wriPage = 0; renderWriTable(fs); }
+    else if (state.tab === 'location') { state.locPage = 0; renderLocationTab(fs); }
+    else if (state.tab === 'theme')    { renderThemeTab(fs); }
     else { state.tablePage = 0; renderTable(fs); }
   }
   function sum(a, k) { return a.reduce(function (s, f) { return s + f[k]; }, 0); }
@@ -330,6 +500,23 @@
     var grid = $('div-grid'); grid.innerHTML = '';
     grid.appendChild(diversityPanel(fs, 'dir', 'DIRECTOR'));
     grid.appendChild(diversityPanel(fs, 'wri', 'WRITER'));
+  }
+
+  function renderTopPersonCharts() {
+    var grid = $('top-persons-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    var TOP_N = 15;
+    var purpleColor = cssVar('--map-purple');
+    var tealColor   = cssVar('--map-teal');
+
+    var dirTop = _dirBubbles.slice().sort(function (a, b) { return b.count - a.count; }).slice(0, TOP_N);
+    grid.appendChild(hbarChart('Top Countries · Directors',
+      dirTop.map(function (d) { return { label: d.country, n: d.count, color: purpleColor }; })));
+
+    var wriTop = _wriBubbles.slice().sort(function (a, b) { return b.count - a.count; }).slice(0, TOP_N);
+    grid.appendChild(hbarChart('Top Countries · Writers',
+      wriTop.map(function (d) { return { label: d.country, n: d.count, color: tealColor }; })));
   }
   function diversityPanel(fs, key, title) {
     var total = fs.length || 1;
@@ -548,7 +735,7 @@
     var head = $('thead'); head.innerHTML = '';
     COLUMNS.forEach(function (c) {
       var active = state.sortKey === c.key;
-      var arrow = active ? (state.sortDir === 'asc' ? ' \u2191' : ' \u2193') : '';
+      var arrow = active ? (state.sortDir === 'asc' ? ' ↑' : ' ↓') : '';
       head.appendChild(el('div', {
         class: 'th' + (c.right ? ' right' : '') + (active ? ' active' : ''),
         onclick: function () {
@@ -560,7 +747,7 @@
       }, c.label + arrow));
     });
 
-    // Body \u2014 only current page
+    // Body — only current page
     var body = $('tbody'); body.innerHTML = '';
     if (!page.length) {
       body.appendChild(el('div', { class: 'empty-row' }, 'No films match the current filters.'));
@@ -568,16 +755,16 @@
       page.forEach(function (f) {
         body.appendChild(el('div', { class: 'trow' }, [
           el('div', { class: 'cell b' }, f.title),
-          el('div', { class: 'cell muted' }, f.director),
+          el('div', { class: 'cell muted' }, f.directorsAll || f.director),
           el('div', { class: 'cell mono right' }, f.year),
-          el('div', { class: 'cell muted' }, f.country),
-          el('div', { class: 'cell genre' }, [el('span', { class: 'gdot', style: 'background:' + colorOf(f.genre) }), f.genre]),
-          el('div', { class: 'cell bold right' }, '\u2605 ' + f.rating.toFixed(1)),
-          el('div', { class: 'cell mono right' }, f.ratingMl ? '\u2605 ' + f.ratingMl.toFixed(1) : '\u2013'),
-          el('div', { class: 'cell mono right' }, f.votesMl ? fmtVotes(f.votesMl) : '\u2013'),
+          el('div', { class: 'cell muted' }, f.countriesAll || f.country),
+          el('div', { class: 'cell genre' }, [el('span', { class: 'gdot', style: 'background:' + colorOf(f.genre) }), f.genresAll || f.genre]),
+          el('div', { class: 'cell bold right' }, '★ ' + f.rating.toFixed(1)),
+          el('div', { class: 'cell mono right' }, f.ratingMl ? '★ ' + f.ratingMl.toFixed(1) : '–'),
+          el('div', { class: 'cell mono right' }, f.votesMl ? fmtVotes(f.votesMl) : '–'),
           el('div', { class: 'cell mono right' }, fmtMoney(f.box)),
-          el('div', { class: 'cell mono right' }, f.oscars || '\u2013'),
-          el('div', { class: 'cell mono right' }, f.otherAwards || '\u2013')
+          el('div', { class: 'cell mono right' }, f.oscars || '–'),
+          el('div', { class: 'cell mono right' }, f.otherAwards || '–')
         ]));
       });
     }
@@ -591,16 +778,493 @@
       onclick: function () {
         if (state.tablePage > 0) { state.tablePage--; renderTable(fs); }
       }
-    }, '\u2190 Prev'));
+    }, '← Prev'));
     pager.appendChild(el('span', { class: 'pager-info' },
-      from + '\u2013' + to + ' / ' + total + ' filmes'
+      from + '–' + to + ' / ' + total + ' filmes'
     ));
     pager.appendChild(el('button', {
       class: 'pager-btn' + (state.tablePage >= totalPages - 1 ? ' disabled' : ''),
       onclick: function () {
         if (state.tablePage < totalPages - 1) { state.tablePage++; renderTable(fs); }
       }
-    }, 'Next \u2192'));
+    }, 'Next →'));
+  }
+
+  /* ---------------- Director / Writer tables ---------------- */
+  var PERSON_COLS = [
+    { key: 'name',        label: 'Name',          right: false },
+    { key: 'gender',      label: 'Gender',         right: false },
+    { key: 'nationality', label: 'Nationality',    right: false },
+    { key: 'race',        label: 'Race',           right: false },
+    { key: 'birthYear',   label: 'Birth Year',     right: true  },
+    { key: 'count',       label: 'Movies',         right: true  },
+    { key: 'votesImdb',   label: 'Votes IMDB',     right: true  },
+    { key: 'votesMl',     label: 'Votes ML',       right: true  },
+    { key: 'ratingImdb',  label: 'Avg ★ IMDB', right: true },
+    { key: 'ratingMl',    label: 'Avg ★ ML',   right: true },
+    { key: 'oscars',      label: 'Oscars',         right: true  },
+    { key: 'otherAwards', label: 'Awards',         right: true  }
+  ];
+
+  function aggregatePeople(fs, nameKey, personKey) {
+    var map = {};
+    fs.forEach(function (f) {
+      var name = nameKey === 'director' ? f.director : f.wri.name;
+      if (!name) return;
+      var p = f[personKey];
+      var e = map[name] = map[name] || {
+        name: name, gender: p.gender, nationality: p.country, race: p.race,
+        birthYear: null, count: 0,
+        votesImdb: 0, votesMl: 0, _rImdb: 0, _rMl: 0,
+        oscars: 0, otherAwards: 0
+      };
+      if (e.birthYear == null && p.age != null && f.year != null) e.birthYear = f.year - p.age;
+      e.count++;
+      e.votesImdb  += f.votesImdb;
+      e.votesMl    += f.votesMl;
+      e._rImdb     += f.rating;
+      e._rMl       += (f.ratingMl || 0);
+      e.oscars     += f.oscars;
+      e.otherAwards += f.otherAwards;
+    });
+    return Object.keys(map).map(function (n) {
+      var e = map[n];
+      return {
+        name: e.name, gender: e.gender, nationality: e.nationality, race: e.race,
+        birthYear: e.birthYear,
+        count: e.count, votesImdb: e.votesImdb, votesMl: e.votesMl,
+        ratingImdb: Math.round(e._rImdb / e.count * 10) / 10,
+        ratingMl:   Math.round(e._rMl  / e.count * 10) / 10,
+        oscars: e.oscars, otherAwards: e.otherAwards
+      };
+    });
+  }
+
+  function renderPersonTable(data, headId, bodyId, pagerId, sortKeyRef, sortDirRef, pageRef) {
+    var sortDir = state[sortDirRef] === 'asc' ? 1 : -1;
+    var sorted = data.slice().sort(function (a, b) {
+      var av = a[state[sortKeyRef]], bv = b[state[sortKeyRef]];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1 * sortDir;
+      if (bv == null) return -1 * sortDir;
+      if (typeof av === 'string') return av.localeCompare(bv) * sortDir;
+      return (av - bv) * sortDir;
+    });
+    var total = sorted.length;
+    var totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    state[pageRef] = Math.min(state[pageRef], totalPages - 1);
+    var start = state[pageRef] * PAGE_SIZE;
+    var page = sorted.slice(start, start + PAGE_SIZE);
+
+    var head = $(headId); head.innerHTML = '';
+    PERSON_COLS.forEach(function (c) {
+      var active = state[sortKeyRef] === c.key;
+      var arrow = active ? (state[sortDirRef] === 'asc' ? ' ↑' : ' ↓') : '';
+      head.appendChild(el('div', {
+        class: 'th' + (c.right ? ' right' : '') + (active ? ' active' : ''),
+        onclick: function () {
+          if (state[sortKeyRef] === c.key) state[sortDirRef] = state[sortDirRef] === 'desc' ? 'asc' : 'desc';
+          else { state[sortKeyRef] = c.key; state[sortDirRef] = 'desc'; }
+          state[pageRef] = 0;
+          renderPersonTable(data, headId, bodyId, pagerId, sortKeyRef, sortDirRef, pageRef);
+        }
+      }, c.label + arrow));
+    });
+
+    var body = $(bodyId); body.innerHTML = '';
+    if (!page.length) {
+      body.appendChild(el('div', { class: 'empty-row' }, 'No results match the current filters.'));
+    } else {
+      page.forEach(function (p) {
+        body.appendChild(el('div', { class: 'person-trow' }, [
+          el('div', { class: 'cell b' },             p.name        || '–'),
+          el('div', { class: 'cell muted' },          p.gender      || '–'),
+          el('div', { class: 'cell muted' },          p.nationality || '–'),
+          el('div', { class: 'cell muted' },          p.race        || '–'),
+          el('div', { class: 'cell mono right' },     p.birthYear   || '–'),
+          el('div', { class: 'cell mono right' },     p.count),
+          el('div', { class: 'cell mono right' },     fmtVotes(p.votesImdb)),
+          el('div', { class: 'cell mono right' },     p.votesMl ? fmtVotes(p.votesMl) : '–'),
+          el('div', { class: 'cell bold right' },     '★ ' + p.ratingImdb.toFixed(1)),
+          el('div', { class: 'cell mono right' },     p.ratingMl ? '★ ' + p.ratingMl.toFixed(1) : '–'),
+          el('div', { class: 'cell mono right' },     p.oscars      || '–'),
+          el('div', { class: 'cell mono right' },     p.otherAwards || '–')
+        ]));
+      });
+    }
+
+    var pager = $(pagerId); pager.innerHTML = '';
+    var from = total ? start + 1 : 0, to = Math.min(start + PAGE_SIZE, total);
+    pager.appendChild(el('button', {
+      class: 'pager-btn' + (state[pageRef] === 0 ? ' disabled' : ''),
+      onclick: function () {
+        if (state[pageRef] > 0) { state[pageRef]--; renderPersonTable(data, headId, bodyId, pagerId, sortKeyRef, sortDirRef, pageRef); }
+      }
+    }, '← Prev'));
+    pager.appendChild(el('span', { class: 'pager-info' }, from + '–' + to + ' / ' + total + ' pessoas'));
+    pager.appendChild(el('button', {
+      class: 'pager-btn' + (state[pageRef] >= totalPages - 1 ? ' disabled' : ''),
+      onclick: function () {
+        if (state[pageRef] < totalPages - 1) { state[pageRef]++; renderPersonTable(data, headId, bodyId, pagerId, sortKeyRef, sortDirRef, pageRef); }
+      }
+    }, 'Next →'));
+  }
+
+  function renderDirTable(fs) {
+    var data = aggregatePeople(fs, 'director', 'dir');
+    renderPersonTable(data, 'dir-thead', 'dir-tbody', 'dir-tpager', 'dirSortKey', 'dirSortDir', 'dirPage');
+  }
+  function renderWriTable(fs) {
+    var data = aggregatePeople(fs, 'writer', 'wri');
+    renderPersonTable(data, 'wri-thead', 'wri-tbody', 'wri-tpager', 'wriSortKey', 'wriSortDir', 'wriPage');
+  }
+
+  /* ---------------- Location tab ---------------- */
+  function computeLocBubbles(rows) {
+    var groups = {};
+    rows.forEach(function (r) {
+      var c = r.country || 'Unknown';
+      groups[c] = (groups[c] || 0) + r.mentions;
+    });
+    return Object.keys(groups).map(function (c) { return { country: c, mentions: groups[c] }; });
+  }
+
+  function locMapTipFn(entry) {
+    return '<div class="tt-title">' + entry.country + '</div>' +
+      '<div class="tt-row"><span>Mentions</span><b>' + fmtVotes(entry.mentions) + '</b></div>';
+  }
+
+  function renderLocationTab(fs) {
+    var filmMap = {};
+    fs.forEach(function (f) { filmMap[f.imdbid] = f; });
+
+    // Populate datalists from ALL LOC_DATA for current film set
+    // (ignore loc search here so options stay available while typing)
+    var namesByType = {};
+    LOC_TYPES.forEach(function (t) { namesByType[t] = {}; });
+    LOC_DATA.forEach(function (r) {
+      if (filmMap[r.imdbid] && namesByType[r.locType]) namesByType[r.locType][r.location] = true;
+    });
+    LOC_TYPES.forEach(function (t) {
+      var dl = $('dl-loc-' + t.toLowerCase());
+      if (!dl) return;
+      dl.innerHTML = '';
+      Object.keys(namesByType[t]).sort().forEach(function (name) {
+        dl.appendChild(el('option', { value: name }));
+      });
+    });
+
+    // Filter rows: film in fs + per-type search match
+    var anyActive = LOC_TYPES.some(function (t) { return state.locSearch[t].trim(); });
+    var filteredRows = LOC_DATA.filter(function (r) {
+      if (!filmMap[r.imdbid]) return false;
+      if (!anyActive) return true;
+      var s = (state.locSearch[r.locType] || '').trim().toLowerCase();
+      if (!s) return false;
+      return r.location.toLowerCase().indexOf(s) >= 0;
+    });
+
+    // Map: production countries by total mentions
+    _locBubbles = computeLocBubbles(filteredRows);
+    var locHolder = $('map-holder-loc');
+    if (locHolder) {
+      if (!window.d3 || !window.topojson) { setTimeout(function () { renderLocationTab(fs); }, 120); return; }
+      if (!_ro5) {
+        _ro5 = new ResizeObserver(function () {
+          drawMap('map-holder-loc', 'tooltip-loc', 'mentions', 'mentions', '--map-green', '--map-green-faint', _locBubbles, locMapTipFn);
+        });
+        _ro5.observe(locHolder);
+      }
+      if (!_world && !_worldLoading) {
+        _worldLoading = true;
+        fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json')
+          .then(function (r) { return r.json(); })
+          .then(function (topo) {
+            _world = window.topojson.feature(topo, topo.objects.countries).features;
+            drawMap('map-holder-loc', 'tooltip-loc', 'mentions', 'mentions', '--map-green', '--map-green-faint', _locBubbles, locMapTipFn);
+          }).catch(function () {});
+      }
+      drawMap('map-holder-loc', 'tooltip-loc', 'mentions', 'mentions', '--map-green', '--map-green-faint', _locBubbles, locMapTipFn);
+    }
+
+    // Chart: top 15 production countries by distinct film count
+    var locChartEl = $('loc-chart');
+    if (locChartEl) {
+      var cntryFilms = {};
+      filteredRows.forEach(function (r) {
+        var f = filmMap[r.imdbid];
+        var c = f ? f.country : (r.country || 'Unknown');
+        if (!cntryFilms[c]) cntryFilms[c] = {};
+        cntryFilms[c][r.imdbid] = true;
+      });
+      var chartArr = Object.keys(cntryFilms)
+        .map(function (c) { return { label: c, n: Object.keys(cntryFilms[c]).length }; })
+        .sort(function (a, b) { return b.n - a.n; }).slice(0, 15);
+      locChartEl.innerHTML = '';
+      if (chartArr.length) {
+        var card = hbarChart('Production Countries · Films with Matching Locations', chartArr);
+        card.style.gridColumn = '1 / -1';
+        locChartEl.appendChild(card);
+      }
+    }
+
+    // Build table rows: one per (film × location) pair
+    var tableRows = filteredRows.map(function (r) {
+      var f = filmMap[r.imdbid];
+      return {
+        title:     f ? f.title : r.title,
+        countries: f ? (f.countriesAll || f.country) : (r.country || 'Unknown'),
+        location:  r.location,
+        locType:   r.locType || 'Other',
+        mentions:  r.mentions
+      };
+    });
+
+    renderLocFilmTable(tableRows);
+  }
+
+  var LOC_FILM_COLS = [
+    { key: 'title',     label: 'Film',      right: false },
+    { key: 'countries', label: 'Countries', right: false },
+    { key: 'location',  label: 'Location',  right: false },
+    { key: 'locType',   label: 'Type',      right: false },
+    { key: 'mentions',  label: 'Mentions',  right: true  },
+  ];
+
+  function renderLocFilmTable(rows) {
+    var dir = state.locSortDir === 'asc' ? 1 : -1;
+    var sorted = rows.slice().sort(function (a, b) {
+      var av = a[state.locSortKey], bv = b[state.locSortKey];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1 * dir; if (bv == null) return -1 * dir;
+      if (typeof av === 'string') return av.localeCompare(bv) * dir;
+      return (av - bv) * dir;
+    });
+    var total = sorted.length;
+    var totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    state.locPage = Math.min(state.locPage, totalPages - 1);
+    var start = state.locPage * PAGE_SIZE;
+    var page = sorted.slice(start, start + PAGE_SIZE);
+
+    var head = $('loc-thead'); head.innerHTML = '';
+    LOC_FILM_COLS.forEach(function (c) {
+      var active = state.locSortKey === c.key;
+      var arrow = active ? (state.locSortDir === 'asc' ? ' ↑' : ' ↓') : '';
+      head.appendChild(el('div', {
+        class: 'th' + (c.right ? ' right' : '') + (active ? ' active' : ''),
+        onclick: function () {
+          if (state.locSortKey === c.key) state.locSortDir = state.locSortDir === 'desc' ? 'asc' : 'desc';
+          else { state.locSortKey = c.key; state.locSortDir = 'desc'; }
+          state.locPage = 0; renderLocFilmTable(rows);
+        }
+      }, c.label + arrow));
+    });
+
+    var body = $('loc-tbody'); body.innerHTML = '';
+    if (!page.length) {
+      body.appendChild(el('div', { class: 'empty-row' }, 'No locations match the current filters.'));
+    } else {
+      page.forEach(function (r) {
+        var typeColor = LOC_TYPE_COLORS[r.locType] || '#9aa6b8';
+        var badge = el('span', {
+          class: 'loc-type-badge',
+          style: 'background:' + typeColor + '22;color:' + typeColor + ';border:1px solid ' + typeColor + '44'
+        }, r.locType);
+        body.appendChild(el('div', { class: 'loc-trow' }, [
+          el('div', { class: 'cell b' }, r.title),
+          el('div', { class: 'cell muted' }, r.countries),
+          el('div', { class: 'cell' }, r.location),
+          el('div', { class: 'cell' }, badge),
+          el('div', { class: 'cell mono right' }, fmtVotes(r.mentions))
+        ]));
+      });
+    }
+
+    var pager = $('loc-tpager'); pager.innerHTML = '';
+    var from = total ? start + 1 : 0, to = Math.min(start + PAGE_SIZE, total);
+    pager.appendChild(el('button', {
+      class: 'pager-btn' + (state.locPage === 0 ? ' disabled' : ''),
+      onclick: function () { if (state.locPage > 0) { state.locPage--; renderLocFilmTable(rows); } }
+    }, '← Prev'));
+    pager.appendChild(el('span', { class: 'pager-info' }, from + '–' + to + ' / ' + total + ' registros'));
+    pager.appendChild(el('button', {
+      class: 'pager-btn' + (state.locPage >= totalPages - 1 ? ' disabled' : ''),
+      onclick: function () { if (state.locPage < totalPages - 1) { state.locPage++; renderLocFilmTable(rows); } }
+    }, 'Next →'));
+  }
+
+  /* ---------------- Theme tab ---------------- */
+  function computeThemeBubbles(rows) {
+    var groups = {};
+    rows.forEach(function (r) {
+      var c = r.country || 'Unknown';
+      groups[c] = (groups[c] || 0) + r.mentions;
+    });
+    return Object.keys(groups).map(function (c) { return { country: c, mentions: groups[c] }; });
+  }
+
+  function themeMapTipFn(entry) {
+    return '<div class="tt-title">' + entry.country + '</div>' +
+      '<div class="tt-row"><span>Mentions</span><b>' + fmtVotes(entry.mentions) + '</b></div>';
+  }
+
+  function renderThemeTab(fs) {
+    var opts    = state.themeOptions;
+    var idiom   = state.themeSearch.idiom.trim();
+    var themeVal= state.themeSearch.theme.trim();
+    var wordVal = state.themeSearch.word.trim();
+
+    // Populate sidebar selects from options (loaded once from server)
+    var idiomSel = $('theme-idiom-sel');
+    if (idiomSel && opts) {
+      var curIdiom = idiomSel.value;
+      idiomSel.innerHTML = '';
+      idiomSel.appendChild(new Option('All', ''));
+      (opts.idioms || []).forEach(function (v) {
+        var opt = new Option(v, v);
+        if (v === idiom) opt.selected = true;
+        idiomSel.appendChild(opt);
+      });
+      if (!idiom && curIdiom) idiomSel.value = curIdiom;
+    }
+
+    var themeSel = $('theme-theme-sel');
+    if (themeSel && opts) {
+      var themes = idiom ? (opts.themes_by_idiom[idiom] || []) : [];
+      themeSel.innerHTML = '';
+      themeSel.appendChild(new Option('All themes', ''));
+      themes.forEach(function (v) {
+        var opt = new Option(v, v);
+        if (v === themeVal) opt.selected = true;
+        themeSel.appendChild(opt);
+      });
+      themeSel.disabled = !idiom;
+    }
+
+    var wordSel = $('theme-word-sel');
+    if (wordSel && opts) {
+      wordSel.innerHTML = '';
+      if (!themeVal) {
+        wordSel.appendChild(new Option('Select theme first', ''));
+        wordSel.disabled = true;
+      } else {
+        wordSel.disabled = false;
+        wordSel.appendChild(new Option('All words', ''));
+        var words = (opts.words_by_theme[idiom] || {})[themeVal] || [];
+        words.forEach(function (v) {
+          var opt = new Option(v, v);
+          if (v === wordVal) opt.selected = true;
+          wordSel.appendChild(opt);
+        });
+      }
+    }
+
+    // Map — from server-aggregated country mentions
+    var mapBubbles = Object.keys(state.themeMapData).map(function (c) {
+      return { country: c, mentions: state.themeMapData[c] };
+    });
+    _themeBubbles = mapBubbles;
+    var themeHolder = $('map-holder-theme');
+    if (themeHolder) {
+      if (!window.d3 || !window.topojson) { setTimeout(function () { renderThemeTab(fs); }, 120); return; }
+      if (!_ro6) {
+        _ro6 = new ResizeObserver(function () {
+          drawMap('map-holder-theme', 'tooltip-theme', 'mentions', 'mentions', '--map-purple', '--map-purple-faint', _themeBubbles, themeMapTipFn);
+        });
+        _ro6.observe(themeHolder);
+      }
+      if (!_world && !_worldLoading) {
+        _worldLoading = true;
+        fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json')
+          .then(function (r) { return r.json(); })
+          .then(function (topo) {
+            _world = window.topojson.feature(topo, topo.objects.countries).features;
+            drawMap('map-holder-theme', 'tooltip-theme', 'mentions', 'mentions', '--map-purple', '--map-purple-faint', _themeBubbles, themeMapTipFn);
+          }).catch(function () {});
+      }
+      drawMap('map-holder-theme', 'tooltip-theme', 'mentions', 'mentions', '--map-purple', '--map-purple-faint', _themeBubbles, themeMapTipFn);
+    }
+
+    // Chart — from server-provided theme stats
+    var themeChartEl = $('theme-chart');
+    if (themeChartEl) {
+      themeChartEl.innerHTML = '';
+      var chartArr = (state.themeChartData || []).map(function (d) { return { label: d.theme, n: d.n }; });
+      if (chartArr.length) {
+        var card = hbarChart('Themes · Films', chartArr);
+        card.style.gridColumn = '1 / -1';
+        themeChartEl.appendChild(card);
+      }
+    }
+
+    // Table — server-side paginated rows (sort/page trigger new loadThemeFilter calls)
+    renderThemeTable(state.themeFilterRows, state.themeFilterTotal, state.themeLoading);
+  }
+
+  var THEME_COLS = [
+    { key: 'title',    label: 'Film',     right: false },
+    { key: 'idiom',    label: 'Idiom',    right: false },
+    { key: 'theme',    label: 'Theme',    right: false },
+    { key: 'word',     label: 'Word',     right: false },
+    { key: 'mentions', label: 'Mentions', right: true  },
+  ];
+
+  var IDIOM_COLORS = { 'EN': '#5b9bf0', 'PT-BR': '#3fbf9a' };
+
+  function renderThemeTable(rows, total, loading) {
+    var head = $('theme-thead'); head.innerHTML = '';
+    THEME_COLS.forEach(function (c) {
+      var active = state.themeSortKey === c.key;
+      var arrow = active ? (state.themeSortDir === 'asc' ? ' ↑' : ' ↓') : '';
+      head.appendChild(el('div', {
+        class: 'th' + (c.right ? ' right' : '') + (active ? ' active' : ''),
+        onclick: function () {
+          if (state.themeSortKey === c.key) state.themeSortDir = state.themeSortDir === 'desc' ? 'asc' : 'desc';
+          else { state.themeSortKey = c.key; state.themeSortDir = 'desc'; }
+          loadThemeFilter(0);
+        }
+      }, c.label + arrow));
+    });
+
+    var body = $('theme-tbody'); body.innerHTML = '';
+    if (loading) {
+      body.appendChild(el('div', { class: 'empty-row' }, 'Buscando…'));
+    } else if (!rows || !rows.length) {
+      var msg = (state.themeSearch.idiom || state.themeSearch.theme || state.themeSearch.word)
+        ? 'No themes match the current filters.'
+        : 'Select Idiom and Theme to explore.';
+      body.appendChild(el('div', { class: 'empty-row' }, msg));
+    } else {
+      rows.forEach(function (r) {
+        var idiomColor = IDIOM_COLORS[r.idiom] || '#9aa6b8';
+        var badge = el('span', {
+          class: 'idiom-badge',
+          style: 'background:' + idiomColor + '22;color:' + idiomColor + ';border:1px solid ' + idiomColor + '44'
+        }, r.idiom);
+        body.appendChild(el('div', { class: 'theme-trow' }, [
+          el('div', { class: 'cell b' }, r.title),
+          el('div', { class: 'cell' }, badge),
+          el('div', { class: 'cell muted' }, r.theme),
+          el('div', { class: 'cell' }, r.word),
+          el('div', { class: 'cell mono right' }, fmtVotes(r.mentions))
+        ]));
+      });
+    }
+
+    var pager = $('theme-tpager'); pager.innerHTML = '';
+    total = total || 0;
+    var totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    var start = state.themePage * PAGE_SIZE;
+    var from = total ? start + 1 : 0, to = Math.min(start + PAGE_SIZE, total);
+    pager.appendChild(el('button', {
+      class: 'pager-btn' + (state.themePage === 0 ? ' disabled' : ''),
+      onclick: function () { if (state.themePage > 0) loadThemeFilter(state.themePage - 1); }
+    }, '← Prev'));
+    pager.appendChild(el('span', { class: 'pager-info' }, from + '–' + to + ' / ' + total + ' registros'));
+    pager.appendChild(el('button', {
+      class: 'pager-btn' + (state.themePage >= totalPages - 1 ? ' disabled' : ''),
+      onclick: function () { if (state.themePage < totalPages - 1) loadThemeFilter(state.themePage + 1); }
+    }, 'Next →'));
   }
 
   /* ---------------- Map ---------------- */
@@ -615,7 +1279,7 @@
         country: c,
         count: list.length,
         votesMl: list.reduce(function (a, f) { return a + f.votesMl; }, 0),
-        top: top ? top.title : '\u2014',
+        top: top ? top.title : '—',
         rating: avg.toFixed(1),
         box: fmtMoney(list.reduce(function (a, f) { return a + f.box; }, 0))
       };
@@ -754,7 +1418,7 @@
           '<div class="tt-title">' + entry.country + '</div>' +
           '<div class="tt-row"><span>Films</span><b>' + entry.count + '</b></div>' +
           '<div class="tt-row"><span>ML votes</span><b>' + fmtVotes(entry.votesMl) + '</b></div>' +
-          '<div class="tt-row"><span>Avg rating</span><b>\u2605 ' + entry.rating + '</b></div>' +
+          '<div class="tt-row"><span>Avg rating</span><b>★ ' + entry.rating + '</b></div>' +
           '<div class="tt-row"><span>Box office</span><b>' + entry.box + '</b></div>' +
           '<div class="tt-top">Top: ' + entry.top + '</div>';
       })
@@ -788,6 +1452,10 @@
     $('pane-map').classList.toggle('active', tab === 'map');
     $('pane-charts').classList.toggle('active', tab === 'charts');
     $('pane-table').classList.toggle('active', tab === 'table');
+    $('pane-director').classList.toggle('active', tab === 'director');
+    $('pane-writer').classList.toggle('active', tab === 'writer');
+    $('pane-location').classList.toggle('active', tab === 'location');
+    $('pane-theme').classList.toggle('active', tab === 'theme');
     render();
   }
 
@@ -799,6 +1467,8 @@
     var icon = $('theme-icon');
     if (icon) icon.innerHTML = dark ? MOON_SVG : SUN_SVG;
     if (state.tab === 'map') { drawAllMaps(); }
+    if (state.tab === 'location') { drawMap('map-holder-loc', 'tooltip-loc', 'mentions', 'mentions', '--map-green', '--map-green-faint', _locBubbles, locMapTipFn); }
+    if (state.tab === 'theme')    { drawMap('map-holder-theme', 'tooltip-theme', 'mentions', 'mentions', '--map-purple', '--map-purple-faint', _themeBubbles, themeMapTipFn); }
   }
 
   function init() {
@@ -817,8 +1487,15 @@
     });
     $('clear-btn').addEventListener('click', function () {
       ['mlGenres','imdbGenres','years','continents','regions','countries','dirGenders','dirRaces','dirRegions','dirCountries','wriGenders','wriRaces','wriRegions','wriCountries'].forEach(function (k) { state[k] = []; });
-      state.search = '';
-      var si = document.querySelector('.search'); if (si) si.value = '';
+      state.search = ''; state.searchDir = ''; state.searchWri = '';
+      LOC_TYPES.forEach(function (t) { state.locSearch[t] = ''; var inp = $('search-loc-' + t.toLowerCase()); if (inp) inp.value = ''; });
+      state.themeSearch = { idiom: '', theme: '', word: '' };
+      state.themeFilterIds = null; state.themeFilterRows = []; state.themeFilterTotal = 0;
+      state.themeMapData = {}; state.themeChartData = []; state.themePage = 0;
+      var idiomEl = $('theme-idiom-sel'); if (idiomEl) idiomEl.value = '';
+      var themeEl = $('theme-theme-sel'); if (themeEl) themeEl.value = '';
+      var wordEl  = $('theme-word-sel');  if (wordEl)  { wordEl.value = ''; wordEl.disabled = true; }
+      ['search-film', 'search-dir', 'search-wri'].forEach(function (id) { var el = $(id); if (el) el.value = ''; });
       render();
     });
     render();
@@ -833,16 +1510,21 @@
     var dots = document.createElement('div');
     dots.style.cssText = 'color:rgba(239,168,56,0.4);font-family:JetBrains Mono,monospace;font-size:11px;letter-spacing:1px;';
     dots.textContent = 'connecting to oracle';
-    overlay.appendChild(msg); overlay.appendChild(dots);
+    overlay.appendChild(msg);
     document.body.appendChild(overlay);
 
     Promise.all([
       fetch('/api/films').then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
-      fetch('/api/ratings-dist').then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      fetch('/api/ratings-dist').then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+      fetch('/api/locations').then(function(r) { if (!r.ok) return []; return r.json(); }).catch(function() { return []; })
     ])
       .then(function(results) {
         var data = results[0];
         RATINGS_DIST = results[1];
+        LOC_DATA = (results[2] || []).map(function(r) {
+          r.location = toTitleCase(r.location);
+          return r;
+        });
         FILMS = data;
         YEARS = Array.from(
           new Set(FILMS.map(function(f) { return f.year; }).filter(function(y) { return y != null; }))
@@ -866,6 +1548,7 @@
         };
         document.body.removeChild(overlay);
         init();
+        loadThemeOptions();
       })
       .catch(function(err) {
         msg.textContent = 'ERRO: servidor não disponível';
