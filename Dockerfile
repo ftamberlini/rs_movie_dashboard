@@ -11,8 +11,8 @@ RUN uv sync --frozen --no-dev
 # Copia os arquivos da aplicação
 COPY server.py index.html app.js styles.css country-data.js ./
 
-# Ponto de montagem para o Oracle Wallet (volume GCS no Cloud Run)
-RUN mkdir -p /app/oracle
+# Dados Parquet — lidos pelo DuckDB em runtime (sem Oracle)
+COPY data/ ./data/
 
 EXPOSE 8080
 

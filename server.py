@@ -1,30 +1,34 @@
-"""FastAPI backend — CineMap dashboard serving Oracle film data."""
+"""FastAPI backend — CineMap dashboard (DuckDB + Parquet, no Oracle at runtime)."""
 import os
 import re
 import threading
+from pathlib import Path
 from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
-import oracledb
+import duckdb
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
-load_dotenv()
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 
-WALLET_DIR = os.path.abspath(os.getenv("ORACLE_WALLET_DIR", "./oracle"))
+_PARQUET_TABLES = [
+    "country", "ml_imdb", "director", "writer",
+    "movie_imdb", "movie_country", "movie_ml_genre", "movie_imdb_genre",
+    "movie_director", "movie_writer", "movie_rating",
+    "subtitle_geo", "subtitle_theme",
+]
 
 
-def _conn():
-    return oracledb.connect(
-        user=os.getenv("ORACLE_USER"),
-        password=os.getenv("ORACLE_PASSWORD"),
-        dsn=os.getenv("ORACLE_DSN"),
-        config_dir=WALLET_DIR,
-        wallet_location=WALLET_DIR,
-        wallet_password=os.getenv("ORACLE_WALLET_PASSWORD"),
-    )
+def _new_db() -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB in-memory connection with views over the Parquet files."""
+    con = duckdb.connect(":memory:")
+    for t in _PARQUET_TABLES:
+        p = DATA_DIR / f"{t}.parquet"
+        if p.exists():
+            con.execute(f"CREATE VIEW {t} AS SELECT * FROM read_parquet('{p}')")
+    return con
 
 
 # ── Value parsers ─────────────────────────────────────────────────────────────
@@ -68,21 +72,18 @@ def _race(r):
     return "UNKNOWN" if r.upper() == "UNDEFINED" else r.upper()
 
 
-# ── Main query ────────────────────────────────────────────────────────────────
-# One CTE query: LEFT JOINs country (via ISO code, fallback to name),
-# genres, director, writer — one row per movie (ROW_NUMBER rn=1).
+# ── Main films query (DuckDB / Parquet) ───────────────────────────────────────
 
-_QUERY = """\
+_FILMS_QUERY = """\
 WITH
   m AS (
-    SELECT IMDBID, TITLE, YEAR, IMDBRATING, IMDBVOTES, BOXOFFICE,
+    SELECT IMDBID, MOVIEID, TITLE, YEAR, IMDBRATING, IMDBVOTES, BOXOFFICE,
            OSCAR_WINNING, OSCAR_NOMINATION,
            AWARD_WINNING, AWARD_NOMINATION,
            BAFTA_WINNING, BAFTA_NOMINATION,
            EMMY_WINNING,  EMMY_NOMINATION,
-           GENRE AS IMDB_GENRE_RAW,
-           COUNTRY AS IMDB_COUNTRY_RAW,
-           MOVIEID
+           GENRE    AS IMDB_GENRE_RAW,
+           COUNTRY  AS IMDB_COUNTRY_RAW
     FROM movie_imdb
     WHERE TYPE     = 'movie'
       AND IMDBRATING IS NOT NULL
@@ -93,7 +94,7 @@ WITH
     SELECT mc.IMDBID, mc.COUNTRY,
            COALESCE(ci.CONTINENT, cn.CONTINENT) AS CONTINENT,
            COALESCE(ci.REGION,    cn.REGION)    AS REGION,
-           ROW_NUMBER() OVER (PARTITION BY mc.IMDBID ORDER BY mc.ROWID) rn
+           ROW_NUMBER() OVER (PARTITION BY mc.IMDBID) AS rn
     FROM movie_country mc
     LEFT JOIN country ci ON ci.ISO     = mc.ISO
     LEFT JOIN country cn ON cn.COUNTRY = mc.COUNTRY AND ci.ISO IS NULL
@@ -101,30 +102,28 @@ WITH
   ),
   fg AS (
     SELECT mg.MOVIEID, mg.GENRE,
-           ROW_NUMBER() OVER (PARTITION BY mg.MOVIEID ORDER BY mg.ROWID) rn
+           ROW_NUMBER() OVER (PARTITION BY mg.MOVIEID) AS rn
     FROM movie_ml_genre mg
     JOIN m ON m.MOVIEID = mg.MOVIEID
   ),
   fi AS (
     SELECT ig.IMDBID, ig.GENRE,
-           ROW_NUMBER() OVER (PARTITION BY ig.IMDBID ORDER BY ig.ROWID) rn
+           ROW_NUMBER() OVER (PARTITION BY ig.IMDBID) AS rn
     FROM movie_imdb_genre ig
     JOIN m ON m.IMDBID = ig.IMDBID
   ),
   fd AS (
-    SELECT md.IMDBID,
-           md.DIRECTORID,
+    SELECT md.IMDBID, md.DIRECTORID,
            d.NAME, d.GENDER, d.GENDER_LLM, d.RACE, d.BIRTHYEAR, d.NATIONALITY,
-           ROW_NUMBER() OVER (PARTITION BY md.IMDBID ORDER BY md.ROWID) rn
+           ROW_NUMBER() OVER (PARTITION BY md.IMDBID) AS rn
     FROM movie_director md
     JOIN director d ON d.DIRECTORID = md.DIRECTORID
     JOIN m          ON m.IMDBID     = md.IMDBID
   ),
   fw AS (
-    SELECT mw.IMDBID,
-           mw.WRITERID,
+    SELECT mw.IMDBID, mw.WRITERID,
            w.NAME, w.GENDER, w.RACE, w.BIRTHYEAR, w.NATIONALITY,
-           ROW_NUMBER() OVER (PARTITION BY mw.IMDBID ORDER BY mw.ROWID) rn
+           ROW_NUMBER() OVER (PARTITION BY mw.IMDBID) AS rn
     FROM movie_writer mw
     JOIN writer w ON w.WRITERID = mw.WRITERID
     JOIN m        ON m.IMDBID   = mw.IMDBID
@@ -137,7 +136,7 @@ WITH
   ),
   fd_all AS (
     SELECT md.IMDBID,
-           LISTAGG(d.NAME, ', ') WITHIN GROUP (ORDER BY md.ROWID) AS ALL_DIRS
+           STRING_AGG(d.NAME, ', ') AS ALL_DIRS
     FROM movie_director md
     JOIN director d ON d.DIRECTORID = md.DIRECTORID
     JOIN m          ON m.IMDBID     = md.IMDBID
@@ -145,8 +144,7 @@ WITH
   ),
   fc_all AS (
     SELECT mc.IMDBID,
-           LISTAGG(COALESCE(ci.COUNTRY, cn.COUNTRY, mc.COUNTRY), ', ')
-             WITHIN GROUP (ORDER BY mc.ROWID) AS ALL_COUNTRIES
+           STRING_AGG(COALESCE(ci.COUNTRY, cn.COUNTRY, mc.COUNTRY), ', ') AS ALL_COUNTRIES
     FROM movie_country mc
     LEFT JOIN country ci ON ci.ISO     = mc.ISO
     LEFT JOIN country cn ON cn.COUNTRY = mc.COUNTRY AND ci.ISO IS NULL
@@ -155,14 +153,14 @@ WITH
   ),
   fg_all AS (
     SELECT mg.MOVIEID,
-           LISTAGG(mg.GENRE, ', ') WITHIN GROUP (ORDER BY mg.ROWID) AS ALL_ML_GENRES
+           STRING_AGG(mg.GENRE, ', ') AS ALL_ML_GENRES
     FROM movie_ml_genre mg
     JOIN m ON m.MOVIEID = mg.MOVIEID
     GROUP BY mg.MOVIEID
   ),
   fi_all AS (
     SELECT ig.IMDBID,
-           LISTAGG(ig.GENRE, ', ') WITHIN GROUP (ORDER BY ig.ROWID) AS ALL_IMDB_GENRES
+           STRING_AGG(ig.GENRE, ', ') AS ALL_IMDB_GENRES
     FROM movie_imdb_genre ig
     JOIN m ON m.IMDBID = ig.IMDBID
     GROUP BY ig.IMDBID
@@ -210,24 +208,20 @@ ORDER BY m.TITLE
 
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
-_FILMS: list[dict] = []
+_FILMS:        list[dict] = []
 _RATINGS_DIST: list[dict] = []
-_LOCATIONS: list[dict] = []
-_READY: bool = False
+_LOCATIONS:    list[dict] = []
+_READY:        bool       = False
 
 
 def _load_ratings_dist() -> list[dict]:
-    conn = _conn()
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT RATING, SUM(COUNT_RATING) AS VOTES"
-            " FROM movie_rating"
-            " GROUP BY RATING"
-            " ORDER BY RATING"
-        )
-        result = [{"rating": float(r[0]), "votes": int(r[1])} for r in cur.fetchall()]
-    conn.close()
-    return result
+    con = _new_db()
+    rows = con.execute(
+        "SELECT RATING, SUM(COUNT_RATING) AS VOTES"
+        " FROM movie_rating GROUP BY RATING ORDER BY RATING"
+    ).fetchall()
+    con.close()
+    return [{"rating": float(r[0]), "votes": int(r[1])} for r in rows]
 
 
 # ── Location classifier ────────────────────────────────────────────────────────
@@ -798,70 +792,62 @@ def _classify_location(loc: str) -> str:
 
 def _load_locations() -> list[dict]:
     """One row per (location, movie): location name, mention count, imdbid, title, country."""
-    conn = _conn()
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT la.LOCATION,
-                       la.MENTIONS,
-                       mi.IMDBID,
-                       mi.TITLE,
-                       fc.COUNTRY
-                FROM (
-                    SELECT sg.IMDB,
-                           sg.LOCATION,
-                           SUM(sg.COUNT) AS MENTIONS
-                    FROM subtitle_geo sg
-                    GROUP BY sg.IMDB, sg.LOCATION
-                    HAVING SUM(sg.COUNT) >= 2
-                ) la
-                JOIN ml_imdb    mli ON mli.IMDBID  = la.IMDB
-                JOIN movie_imdb mi  ON mi.MOVIEID  = mli.MOVIEID
-                                   AND mi.TYPE      = 'movie'
-                                   AND mi.RESPONSE  = 'true'
-                LEFT JOIN (
-                    SELECT IMDBID, COUNTRY,
-                           ROW_NUMBER() OVER (PARTITION BY IMDBID ORDER BY ROWID) rn
-                    FROM movie_country
-                ) fc ON fc.IMDBID = mi.IMDBID AND fc.rn = 1
-                ORDER BY la.MENTIONS DESC
-                FETCH FIRST 200000 ROWS ONLY
-            """)
-            result = [
-                {
-                    "location": r[0],
-                    "locType":  _classify_location(r[0]),
-                    "mentions": int(r[1]),
-                    "imdbid":   r[2],
-                    "title":    r[3],
-                    "country":  r[4] or "Unknown",
-                }
-                for r in cur.fetchall()
-            ]
+        con = _new_db()
+        rows = con.execute("""
+            SELECT la.LOCATION, la.MENTIONS, mi.IMDBID, mi.TITLE, fc.COUNTRY
+            FROM (
+                SELECT sg.IMDB, sg.LOCATION, SUM(sg.COUNT) AS MENTIONS
+                FROM subtitle_geo sg
+                GROUP BY sg.IMDB, sg.LOCATION
+                HAVING SUM(sg.COUNT) >= 2
+            ) la
+            JOIN ml_imdb    mli ON mli.IMDBID = la.IMDB
+            JOIN movie_imdb mi  ON mi.MOVIEID = mli.MOVIEID
+                               AND mi.TYPE     = 'movie'
+                               AND mi.RESPONSE = 'true'
+            LEFT JOIN (
+                SELECT IMDBID, COUNTRY,
+                       ROW_NUMBER() OVER (PARTITION BY IMDBID) AS rn
+                FROM movie_country
+            ) fc ON fc.IMDBID = mi.IMDBID AND fc.rn = 1
+            ORDER BY la.MENTIONS DESC
+            LIMIT 200000
+        """).fetchall()
+        con.close()
+        result = [
+            {
+                "location": r[0],
+                "locType":  _classify_location(r[0]),
+                "mentions": int(r[1]),
+                "imdbid":   r[2],
+                "title":    r[3],
+                "country":  r[4] or "Unknown",
+            }
+            for r in rows
+        ]
         print(f"[CineMap] {len(result)} location entries loaded")
         return result
     except Exception as e:
         print(f"[CineMap] WARNING: could not load locations: {e}")
         return []
-    finally:
-        conn.close()
 
 
 def _load_films() -> list[dict]:
-    conn = _conn()
+    con = _new_db()
 
     # ISO-3 code → (country_name, continent, region)
-    with conn.cursor() as cur:
-        cur.execute(
+    nat: dict[str, tuple] = {
+        r[0]: (r[1], r[2], r[3])
+        for r in con.execute(
             "SELECT ISO, COUNTRY, CONTINENT, REGION FROM country WHERE ISO IS NOT NULL"
-        )
-        nat: dict[str, tuple] = {r[0]: (r[1], r[2], r[3]) for r in cur.fetchall()}
+        ).fetchall()
+    }
 
     films: list[dict] = []
-    with conn.cursor() as cur:
-        cur.execute(_QUERY)
-        cols = [d[0] for d in cur.description]
-        for raw in cur:
+    cur = con.execute(_FILMS_QUERY)
+    cols = [d[0] for d in cur.description]
+    for raw in cur.fetchall():
             r = dict(zip(cols, raw))
 
             rating = _float(r["IMDBRATING"])
@@ -878,24 +864,26 @@ def _load_films() -> list[dict]:
             imdb_g = r["IMDB_GENRE"] or (r["IMDB_GENRE_RAW"] or "").split(",")[0].strip() or None
             genre  = ml_g or imdb_g or "Other"
 
-            # Awards
-            osc_w = r["OSCAR_WINNING"]    or 0
-            osc_n = r["OSCAR_NOMINATION"] or 0
-            aw_w  = r["AWARD_WINNING"]    or 0
-            aw_n  = r["AWARD_NOMINATION"] or 0
-            ba_w  = r["BAFTA_WINNING"]    or 0
-            ba_n  = r["BAFTA_NOMINATION"] or 0
-            em_w  = r["EMMY_WINNING"]     or 0
-            em_n  = r["EMMY_NOMINATION"]  or 0
+            # Awards (Parquet stores as DOUBLE — convert to int)
+            osc_w = int(r["OSCAR_WINNING"]    or 0)
+            osc_n = int(r["OSCAR_NOMINATION"] or 0)
+            aw_w  = int(r["AWARD_WINNING"]    or 0)
+            aw_n  = int(r["AWARD_NOMINATION"] or 0)
+            ba_w  = int(r["BAFTA_WINNING"]    or 0)
+            ba_n  = int(r["BAFTA_NOMINATION"] or 0)
+            em_w  = int(r["EMMY_WINNING"]     or 0)
+            em_n  = int(r["EMMY_NOMINATION"]  or 0)
             other_awards = max(0, aw_w - osc_w) + max(0, aw_n - osc_n) + ba_w + ba_n + em_w + em_n
+
+            year = int(r["YEAR"]) if r["YEAR"] else None
 
             # Director nationality → country/region lookup
             dn      = nat.get(r["DIR_NAT"] or "", (None, None, None))
-            dir_age = (r["YEAR"] - r["DIR_BY"]) if r["YEAR"] and r["DIR_BY"] else None
+            dir_age = (year - int(r["DIR_BY"])) if year and r["DIR_BY"] else None
 
             # Writer nationality → country/region lookup
             wn      = nat.get(r["WRI_NAT"] or "", (None, None, None))
-            wri_age = (r["YEAR"] - r["WRI_BY"]) if r["YEAR"] and r["WRI_BY"] else None
+            wri_age = (year - int(r["WRI_BY"])) if year and r["WRI_BY"] else None
 
             genres_all = r["ALL_GENRES"] or (r["IMDB_GENRE_RAW"] or "").replace(",", ", ") or genre
 
@@ -906,7 +894,7 @@ def _load_films() -> list[dict]:
                 "director":      r["DIR_NAME"] or "",
                 "directorid":    r["DIR_ID"],
                 "directorsAll":  r["ALL_DIRS"] or r["DIR_NAME"] or "",
-                "year":          r["YEAR"],
+                "year":          year,
                 "country":       country,
                 "countriesAll":  r["ALL_COUNTRIES"] or country,
                 "genre":         genre,
@@ -941,127 +929,20 @@ def _load_films() -> list[dict]:
                 },
             })
 
-    conn.close()
-    print(f"[CineMap] {len(films)} films loaded from Oracle")
+    con.close()
+    print(f"[CineMap] {len(films)} films loaded from Parquet")
     return films
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
-_THEMES: list[dict] = []
-
-
-def _load_themes() -> list[dict]:
-    """One row per (idiom, theme, word, movie) from subtitle_theme.
-    Discovers actual column names at startup to handle schema variants."""
-    conn = _conn()
-    try:
-        with conn.cursor() as cur:
-            # Discover real column names
-            cur.execute("""
-                SELECT COLUMN_NAME FROM ALL_TAB_COLUMNS
-                WHERE TABLE_NAME = 'SUBTITLE_THEME'
-                ORDER BY COLUMN_ID
-            """)
-            cols = [r[0] for r in cur.fetchall()]
-            print(f"[CineMap] subtitle_theme columns: {cols}")
-            if not cols:
-                print("[CineMap] WARNING: subtitle_theme table not found or no access")
-                return []
-
-            def _pick(candidates):
-                for c in candidates:
-                    if c in cols:
-                        return c
-                return None
-
-            imdb_col  = _pick(['IMDB', 'IMDBID', 'IMDB_ID', 'TT_ID'])
-            idiom_col = _pick(['IDIOM', 'LANGUAGE', 'LANG', 'LOCALE'])
-            theme_col = _pick(['THEME', 'CATEGORY', 'TOPIC', 'TYPE'])
-            word_col  = _pick(['WORD', 'TERM', 'KEYWORD', 'TOKEN'])
-            count_col = _pick(['COUNT', 'FREQUENCY', 'OCCURRENCES', 'QTY', 'N'])
-
-            print(f"[CineMap] subtitle_theme mapping → imdb={imdb_col} idiom={idiom_col} "
-                  f"theme={theme_col} word={word_col} count={count_col}")
-
-            if not imdb_col:
-                print(f"[CineMap] WARNING: cannot identify IMDB column in {cols}")
-                return []
-
-            # Sample row to validate
-            cur.execute(f"SELECT * FROM subtitle_theme FETCH FIRST 1 ROW ONLY")
-            sample = cur.fetchone()
-            print(f"[CineMap] subtitle_theme sample row: {sample}")
-
-            imdb_expr  = f"st.{imdb_col}"
-            idiom_expr = f"st.{idiom_col}" if idiom_col else "NULL"
-            theme_expr = f"st.{theme_col}" if theme_col else "NULL"
-            word_expr  = f"st.{word_col}"  if word_col  else "NULL"
-            count_expr = f"SUM(st.{count_col})" if count_col else "COUNT(*)"
-
-            group_by = ", ".join(filter(None, [
-                imdb_expr,
-                f"st.{idiom_col}" if idiom_col else None,
-                f"st.{theme_col}" if theme_col else None,
-                f"st.{word_col}"  if word_col  else None,
-            ]))
-
-            query = f"""
-                SELECT la.IDIOM, la.THEME, la.WORD, la.MENTIONS,
-                       mi.IMDBID, mi.TITLE, fc.COUNTRY
-                FROM (
-                    SELECT {imdb_expr}  AS IMDB,
-                           {idiom_expr} AS IDIOM,
-                           {theme_expr} AS THEME,
-                           {word_expr}  AS WORD,
-                           {count_expr} AS MENTIONS
-                    FROM subtitle_theme st
-                    GROUP BY {group_by}
-                    HAVING SUM(st.{count_col if count_col else '1'}) >= 3
-                ) la
-                JOIN ml_imdb    mli ON mli.IMDBID  = la.IMDB
-                JOIN movie_imdb mi  ON mi.MOVIEID  = mli.MOVIEID
-                                   AND mi.TYPE      = 'movie'
-                                   AND mi.RESPONSE  = 'true'
-                LEFT JOIN (
-                    SELECT IMDBID, COUNTRY,
-                           ROW_NUMBER() OVER (PARTITION BY IMDBID ORDER BY ROWID) rn
-                    FROM movie_country
-                ) fc ON fc.IMDBID = mi.IMDBID AND fc.rn = 1
-                ORDER BY la.MENTIONS DESC
-                FETCH FIRST 2000000 ROWS ONLY
-            """
-            cur.execute(query)
-            result = [
-                {
-                    "idiom":    r[0] or "",
-                    "theme":    r[1] or "",
-                    "word":     r[2] or "",
-                    "mentions": int(r[3]),
-                    "imdbid":   r[4],
-                    "title":    r[5],
-                    "country":  r[6] or "Unknown",
-                }
-                for r in cur.fetchall()
-            ]
-        print(f"[CineMap] {len(result)} theme entries loaded")
-        return result
-    except Exception as e:
-        print(f"[CineMap] WARNING: could not load themes: {e}")
-        return []
-    finally:
-        conn.close()
-
-
 def _load_all_data() -> None:
-    global _FILMS, _RATINGS_DIST, _LOCATIONS, _THEMES, _READY
-    print("[CineMap] Loading films from Oracle…")
+    global _FILMS, _RATINGS_DIST, _LOCATIONS, _READY
+    print("[CineMap] Loading films from Parquet…")
     _FILMS = _load_films()
     _RATINGS_DIST = _load_ratings_dist()
     print("[CineMap] Loading location data…")
     _LOCATIONS = _load_locations()
-    print("[CineMap] Loading theme data…")
-    _THEMES = _load_themes()
     _READY = True
     print("[CineMap] All data loaded — ready to serve.")
 
@@ -1107,24 +988,27 @@ def api_locations():
     return _LOCATIONS
 
 
-@app.get("/api/themes")
-def api_themes():
-    return _THEMES
-
-
 @app.get("/api/themes/options")
 def api_themes_options():
-    """Returns idioms, themes per idiom, and words per idiom+theme — for sidebar selects."""
+    """Idioms, themes per idiom, words per idiom+theme — for sidebar selects."""
+    con = _new_db()
+    rows = con.execute("""
+        SELECT DISTINCT st.IDIOM, st.THEME, st.WORD
+        FROM subtitle_theme st
+        JOIN ml_imdb    mli ON mli.IMDBID = st.IMDB
+        JOIN movie_imdb mi  ON mi.MOVIEID = mli.MOVIEID
+                           AND mi.TYPE = 'movie' AND mi.RESPONSE = 'true'
+        WHERE st.IDIOM IS NOT NULL
+        GROUP BY st.IDIOM, st.THEME, st.WORD
+        HAVING SUM(st.COUNT) >= 3
+        ORDER BY st.IDIOM, st.THEME, st.WORD
+    """).fetchall()
+    con.close()
+
     idioms: set[str] = set()
     themes_by_idiom: dict[str, set] = {}
-    words_by_theme: dict[str, dict] = {}  # {idiom: {theme: set<word>}}
-
-    for r in _THEMES:
-        idiom = r["idiom"]
-        theme = r["theme"]
-        word  = r["word"]
-        if not idiom:
-            continue
+    words_by_theme: dict[str, dict] = {}
+    for idiom, theme, word in rows:
         idioms.add(idiom)
         themes_by_idiom.setdefault(idiom, set()).add(theme)
         words_by_theme.setdefault(idiom, {}).setdefault(theme, set()).add(word)
@@ -1149,84 +1033,80 @@ def api_themes_filter(
     page: int = 0,
     size: int = 50,
 ):
-    """Server-side filtered theme rows — called on each sidebar selection."""
-    rows = _THEMES
+    """Server-side filtered theme rows queried on demand from Parquet via DuckDB."""
+    where_parts = ["SUM(st.COUNT) >= 3"]
+    params: list = []
     if idiom:
-        rows = [r for r in rows if r["idiom"] == idiom]
+        where_parts.append("st.IDIOM = ?")
+        params.append(idiom)
     if theme:
-        rows = [r for r in rows if r["theme"] == theme]
+        where_parts.append("st.THEME = ?")
+        params.append(theme)
     if word:
-        rows = [r for r in rows if r["word"] == word]
+        where_parts.append("st.WORD = ?")
+        params.append(word)
+    having = " AND ".join(where_parts)
 
-    # Film IDs for client-side cross-filter
-    film_ids = list({r["imdbid"] for r in rows})
+    base_sql = f"""
+        SELECT st.IDIOM AS idiom, st.THEME AS theme, st.WORD AS word,
+               SUM(st.COUNT) AS mentions,
+               mi.IMDBID AS imdbid, mi.TITLE AS title,
+               COALESCE(fc.COUNTRY, 'Unknown') AS country
+        FROM subtitle_theme st
+        JOIN ml_imdb    mli ON mli.IMDBID = st.IMDB
+        JOIN movie_imdb mi  ON mi.MOVIEID = mli.MOVIEID
+                           AND mi.TYPE = 'movie' AND mi.RESPONSE = 'true'
+        LEFT JOIN (
+            SELECT IMDBID, COUNTRY, ROW_NUMBER() OVER (PARTITION BY IMDBID) AS rn
+            FROM movie_country
+        ) fc ON fc.IMDBID = mi.IMDBID AND fc.rn = 1
+        GROUP BY st.IDIOM, st.THEME, st.WORD, mi.IMDBID, mi.TITLE, fc.COUNTRY
+        HAVING {having}
+    """
 
-    # Country → total mentions (for map)
-    country_m: dict[str, int] = {}
-    for r in rows:
-        c = r["country"] or "Unknown"
-        country_m[c] = country_m.get(c, 0) + r["mentions"]
-
-    # Top themes by distinct film count (for chart)
-    theme_films: dict[str, set] = {}
-    for r in rows:
-        theme_films.setdefault(r["theme"], set()).add(r["imdbid"])
-    theme_stats = sorted(
-        [{"theme": t, "n": len(f)} for t, f in theme_films.items()],
-        key=lambda x: -x["n"],
-    )[:15]
-
-    # Paginate + sort table rows
-    # _THEMES is already sorted by mentions DESC — skip sort for the common case
     valid_sort = {"mentions", "title", "idiom", "theme", "word"}
     sk = sort if sort in valid_sort else "mentions"
-    reverse = dir != "asc"
-    if sk == "mentions" and reverse:
-        sorted_rows = rows  # already in DESC order from SQL
-    else:
-        sorted_rows = sorted(rows, key=lambda r: (r.get(sk) or ""), reverse=reverse)
-    total = len(sorted_rows)
-    page_rows = sorted_rows[page * size: (page + 1) * size]
+    order = f"{sk} {'ASC' if dir == 'asc' else 'DESC'}"
+
+    con = _new_db()
+
+    # Paginated rows
+    page_rows_raw = con.execute(
+        f"SELECT * FROM ({base_sql}) ORDER BY {order} LIMIT ? OFFSET ?",
+        params + [size, page * size],
+    ).fetchall()
+    cols = ["idiom", "theme", "word", "mentions", "imdbid", "title", "country"]
+    page_rows = [dict(zip(cols, r)) for r in page_rows_raw]
+
+    total = con.execute(
+        f"SELECT COUNT(*) FROM ({base_sql})", params
+    ).fetchone()[0]
+
+    film_ids = [r[0] for r in con.execute(
+        f"SELECT DISTINCT imdbid FROM ({base_sql})", params
+    ).fetchall()]
+
+    country_rows = con.execute(
+        f"SELECT country, SUM(mentions) FROM ({base_sql}) GROUP BY country ORDER BY 2 DESC",
+        params,
+    ).fetchall()
+    country_m = {r[0]: int(r[1]) for r in country_rows}
+
+    theme_rows = con.execute(
+        f"SELECT theme, COUNT(DISTINCT imdbid) AS n FROM ({base_sql}) GROUP BY theme ORDER BY n DESC LIMIT 15",
+        params,
+    ).fetchall()
+    theme_stats = [{"theme": r[0], "n": int(r[1])} for r in theme_rows]
+
+    con.close()
 
     return {
-        "total": total,
-        "film_ids": film_ids,
-        "rows": page_rows,
+        "total":           total,
+        "film_ids":        film_ids,
+        "rows":            page_rows,
         "country_mentions": country_m,
-        "theme_stats": theme_stats,
+        "theme_stats":     theme_stats,
     }
-
-
-@app.get("/api/debug/theme")
-def api_debug_theme():
-    """Returns subtitle_theme columns, a sample row, and first 5 loaded theme entries."""
-    conn = _conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT COLUMN_NAME, DATA_TYPE FROM ALL_TAB_COLUMNS
-                WHERE TABLE_NAME = 'SUBTITLE_THEME' ORDER BY COLUMN_ID
-            """)
-            columns = [{"name": r[0], "type": r[1]} for r in cur.fetchall()]
-            cur.execute("SELECT * FROM subtitle_theme FETCH FIRST 3 ROWS ONLY")
-            sample = [list(r) for r in cur.fetchall()]
-        return {
-            "columns": columns,
-            "sample_rows": sample,
-            "theme_data_loaded": len(_THEMES),
-            "first_5": _THEMES[:5],
-        }
-    except Exception as e:
-        return {"error": str(e)}
-    finally:
-        conn.close()
-
-
-@app.get("/api/reload")
-def api_reload():
-    global _FILMS
-    _FILMS = _load_films()
-    return {"loaded": len(_FILMS)}
 
 
 # Static files served last so API routes take priority

@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "duckdb>=1.5.4",
     "fastapi[standard]>=0.138.0",
     "oracledb>=4.0.1",
+    "pyarrow>=25.0.0",
     "python-dotenv>=1.2.2",
 ]
