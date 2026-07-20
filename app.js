@@ -754,8 +754,8 @@
     } else {
       page.forEach(function (f) {
         body.appendChild(el('div', { class: 'trow' }, [
-          el('div', { class: 'cell b' }, f.title),
-          el('div', { class: 'cell muted' }, f.directorsAll || f.director),
+          el('div', { class: 'cell b', title: 'MovieID: ' + (f.movieid || '–') + ' | IMDb: ' + f.imdbid }, f.title),
+          el('div', { class: 'cell muted', title: f.directorid ? 'DirectorID: ' + f.directorid : '' }, f.directorsAll || f.director),
           el('div', { class: 'cell mono right' }, f.year),
           el('div', { class: 'cell muted' }, f.countriesAll || f.country),
           el('div', { class: 'cell genre' }, [el('span', { class: 'gdot', style: 'background:' + colorOf(f.genre) }), f.genresAll || f.genre]),
@@ -811,9 +811,10 @@
     fs.forEach(function (f) {
       var name = nameKey === 'director' ? f.director : f.wri.name;
       if (!name) return;
+      var pid = nameKey === 'director' ? f.directorid : f.wri.id;
       var p = f[personKey];
       var e = map[name] = map[name] || {
-        name: name, gender: p.gender, nationality: p.country, race: p.race,
+        name: name, id: pid, gender: p.gender, nationality: p.country, race: p.race,
         birthYear: null, count: 0,
         votesImdb: 0, votesMl: 0, _rImdb: 0, _rMl: 0,
         oscars: 0, otherAwards: 0
@@ -830,7 +831,7 @@
     return Object.keys(map).map(function (n) {
       var e = map[n];
       return {
-        name: e.name, gender: e.gender, nationality: e.nationality, race: e.race,
+        name: e.name, id: e.id, gender: e.gender, nationality: e.nationality, race: e.race,
         birthYear: e.birthYear,
         count: e.count, votesImdb: e.votesImdb, votesMl: e.votesMl,
         ratingImdb: Math.round(e._rImdb / e.count * 10) / 10,
@@ -877,7 +878,7 @@
     } else {
       page.forEach(function (p) {
         body.appendChild(el('div', { class: 'person-trow' }, [
-          el('div', { class: 'cell b' },             p.name        || '–'),
+          el('div', { class: 'cell b', title: p.id ? 'ID: ' + p.id : '' }, p.name || '–'),
           el('div', { class: 'cell muted' },          p.gender      || '–'),
           el('div', { class: 'cell muted' },          p.nationality || '–'),
           el('div', { class: 'cell muted' },          p.race        || '–'),

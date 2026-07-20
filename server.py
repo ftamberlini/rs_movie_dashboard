@@ -1,6 +1,7 @@
 """FastAPI backend — CineMap dashboard serving Oracle film data."""
 import os
 import re
+import threading
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -112,6 +113,7 @@ WITH
   ),
   fd AS (
     SELECT md.IMDBID,
+           md.DIRECTORID,
            d.NAME, d.GENDER, d.GENDER_LLM, d.RACE, d.BIRTHYEAR, d.NATIONALITY,
            ROW_NUMBER() OVER (PARTITION BY md.IMDBID ORDER BY md.ROWID) rn
     FROM movie_director md
@@ -120,6 +122,7 @@ WITH
   ),
   fw AS (
     SELECT mw.IMDBID,
+           mw.WRITERID,
            w.NAME, w.GENDER, w.RACE, w.BIRTHYEAR, w.NATIONALITY,
            ROW_NUMBER() OVER (PARTITION BY mw.IMDBID ORDER BY mw.ROWID) rn
     FROM movie_writer mw
@@ -165,7 +168,7 @@ WITH
     GROUP BY ig.IMDBID
   )
 SELECT
-  m.IMDBID, m.TITLE, m.YEAR,
+  m.IMDBID, m.MOVIEID, m.TITLE, m.YEAR,
   m.IMDBRATING, m.IMDBVOTES, m.BOXOFFICE,
   m.OSCAR_WINNING,   m.OSCAR_NOMINATION,
   m.AWARD_WINNING,   m.AWARD_NOMINATION,
@@ -176,10 +179,12 @@ SELECT
   fg.GENRE       AS ML_GENRE,
   fi.GENRE       AS IMDB_GENRE,
   COALESCE(fd.GENDER, fd.GENDER_LLM) AS DIR_GENDER,
+  fd.DIRECTORID  AS DIR_ID,
   fd.NAME        AS DIR_NAME,
   fd.RACE        AS DIR_RACE,
   fd.BIRTHYEAR   AS DIR_BY,
   fd.NATIONALITY AS DIR_NAT,
+  fw.WRITERID    AS WRI_ID,
   fw.NAME        AS WRI_NAME,
   fw.GENDER      AS WRI_GENDER,
   fw.RACE        AS WRI_RACE,
@@ -208,6 +213,7 @@ ORDER BY m.TITLE
 _FILMS: list[dict] = []
 _RATINGS_DIST: list[dict] = []
 _LOCATIONS: list[dict] = []
+_READY: bool = False
 
 
 def _load_ratings_dist() -> list[dict]:
@@ -895,8 +901,10 @@ def _load_films() -> list[dict]:
 
             films.append({
                 "imdbid":        r["IMDBID"],
+                "movieid":       r["MOVIEID"],
                 "title":         r["TITLE"],
                 "director":      r["DIR_NAME"] or "",
+                "directorid":    r["DIR_ID"],
                 "directorsAll":  r["ALL_DIRS"] or r["DIR_NAME"] or "",
                 "year":          r["YEAR"],
                 "country":       country,
@@ -924,6 +932,7 @@ def _load_films() -> list[dict]:
                 },
                 "wri": {
                     "name":    r["WRI_NAME"] or "",
+                    "id":      r["WRI_ID"],
                     "gender":  _gender(r["WRI_GENDER"]),
                     "race":    _race(r["WRI_RACE"]),
                     "country": wn[0] or country,
@@ -1044,9 +1053,8 @@ def _load_themes() -> list[dict]:
         conn.close()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _FILMS, _RATINGS_DIST, _LOCATIONS, _THEMES
+def _load_all_data() -> None:
+    global _FILMS, _RATINGS_DIST, _LOCATIONS, _THEMES, _READY
     print("[CineMap] Loading films from Oracle…")
     _FILMS = _load_films()
     _RATINGS_DIST = _load_ratings_dist()
@@ -1054,6 +1062,15 @@ async def lifespan(app: FastAPI):
     _LOCATIONS = _load_locations()
     print("[CineMap] Loading theme data…")
     _THEMES = _load_themes()
+    _READY = True
+    print("[CineMap] All data loaded — ready to serve.")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start data loading in background so the server binds to the port immediately.
+    # Cloud Run health checks will see /health return 503 until _READY = True.
+    threading.Thread(target=_load_all_data, daemon=True).start()
     yield
 
 
@@ -1065,6 +1082,14 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+@app.get("/health")
+def health():
+    from fastapi.responses import JSONResponse
+    if not _READY:
+        return JSONResponse(status_code=503, content={"status": "loading"})
+    return {"status": "ok"}
 
 
 @app.get("/api/films")
